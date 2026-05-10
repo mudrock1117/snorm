@@ -1,0 +1,65 @@
+MODEL:
+  BACKBONE:
+    NAME: 'resnet101'
+  RPN:
+    ANCHOR_SIZES: (64, 128, 256, 512)
+  ROI_BOX_HEAD:
+    NUM_CLASSES: 8
+    BOX_PREDICTOR: 'resnet101_predictor'
+    POOL_TYPE: 'align'
+  MODE:
+    USE_STUDENT: True
+    INSRANCE_ADV: True
+    UPDATE_TEACHER_ITERUM: 1
+    NET_MOMENTUM: 1.0
+    INIT_DIS_NET: 400
+    
+    TRAIN_PROCESS: 'S0'
+    TEST_PROCESS: 'TC'
+    PJOTYPE: 'NBIAS'
+    
+    UPDATE_STUDENT_MARK: True
+    UPDATE_TEACHER_MARK: True
+    
+ADV:
+  LAYERS: [False, False, True]
+  DIS_MODEL:
+    - in_channels: 512
+      func_name: 'cross_entropy'
+      pool_type: 'avg'
+      loss_weight: 1.0
+      window_strides: [2, 2, 2, 2, 2, 2, 2]
+      window_sizes: [3, 9, 15, 21, 27, 33, 37]
+DATASETS:
+  TRAINS: ['bdd_daytime_clear_train']
+  TARGETS: ['bdd_daytime_clear_train']
+  TESTS: ['bdd_daytime_clear_test','bdd_daytime_fog_test']
+  #TESTS: ['bdd_daytime_clear_train',]
+INPUT:
+  TRANSFORMS_TRAIN:
+    - name: 'random_flip'
+    - name: 'resize'
+      min_size: 600
+    - name: 'normalize'
+      mean: [0.5, 0.5, 0.5]
+      std: [0.5, 0.5, 0.5]
+      to_01: True
+    - name: 'collect'
+  TRANSFORMS_TEST:
+    - name: 'resize'
+      min_size: 600
+    - name: 'normalize'
+      mean: [0.5, 0.5, 0.5]
+      std: [0.5, 0.5, 0.5]
+      to_01: True
+    - name: 'collect'
+SOLVER:
+  EPOCHS: 120
+  STEPS: (16000, 32000, 42000)
+  LR: 1e-4
+  BATCH_SIZE: 6 #10
+  GAMMA: 0.3
+TEST:
+  EVAL_TYPES: ['voc']
+
+WORK_DIR: './debug/city_2_foggy/s0_dbias_color'

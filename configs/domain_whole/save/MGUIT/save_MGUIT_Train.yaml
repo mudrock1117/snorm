@@ -1,0 +1,10 @@
+I2I_SAVE: 
+  dataroot: 'data/INIT' # name of the experiment. It decides where to store samples and models
+  result_dir: './results/MGUIT/train' # path of weights
+  img_save_freq: 1
+  model_save_freq: 5
+  resume_tran: ''
+  name: 'sunny_night'
+  I2I_H: 340
+  I2I_W: 680
+  I2I_B: 1

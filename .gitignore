@@ -1,0 +1,41 @@
+# 忽略虚拟环境
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# 忽略数据集（通常太大不需要提交）
+datasets/
+
+# 忽略模型权重（可以单独备份）
+best.pth
+trained_models/
+
+# 忽略日志和临时文件
+logs/
+nohup.out
+*.log
+
+# 忽略调试输出
+debug/
+samples/
+runs/
+
+# 忽略渲染结果
+adaptive_render_dataset_results/
+full_pipeline_results/
+integration_results/
+render_results_*/
+visualization_results/
+WZ-Evals/
+detection_visualization_plus/
+
+# 忽略测试脚本（可选）
+test_*.py
+
+# 忽略IDE配置
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
