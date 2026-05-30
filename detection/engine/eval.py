@@ -95,14 +95,9 @@ def do_evaluation(model, data_loader, device, types, output_dir, iteration=None,
         #print(img_metas)
         model_time = time.time()
         
-        # 检查是否为夜间数据集
-        is_night_dataset = 'night' in dataset.dataset_name.lower()
-        if is_night_dataset:
-            # 使用ExpoMamba渲染方式进行检测
-            det = model(images, img_metas, targets, moe_mode=7, moe_mark=8)[0]
-        else:
-            # 使用默认方式进行检测
-            det = model(images, img_metas)[0]
+        # 推理阶段：使用 SNorm_0322_valid_refine.py 中的多尺度融合方法
+        # 包含 user_norm_v2 多尺度 + local_gamma_night + ExpoMamba
+        det = model(images, img_metas, targets)[0]
             
         boxes, scores, labels = det['boxes'], det['scores'], det['labels']
 
