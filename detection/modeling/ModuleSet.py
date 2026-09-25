@@ -511,6 +511,18 @@ class ModuleSet(nn.Module):
                 outputs['attn'] = feat_dict['attn']
             if 'attn_masks' in feat_dict.keys():
                 outputs['attn_masks'] = feat_dict['attn_masks']
+            if 'fused_feats' in feat_dict.keys():
+                outputs['fused_feats'] = feat_dict['fused_feats']
+            if 'residual' in feat_dict.keys():
+                outputs['residual'] = feat_dict['residual']
+            if 'local_feats_0' in feat_dict.keys():
+                outputs['local_feats_0'] = feat_dict['local_feats_0']
+            if 'local_feats_1' in feat_dict.keys():
+                outputs['local_feats_1'] = feat_dict['local_feats_1']
+            if 'encoder_f0' in feat_dict.keys():
+                outputs['encoder_f0'] = feat_dict['encoder_f0']
+            if 'encoder_f1' in feat_dict.keys():
+                outputs['encoder_f1'] = feat_dict['encoder_f1']
 
         outputs['feat_dict'] = feat_dict
             
@@ -630,4 +642,3 @@ class ModuleSet(nn.Module):
             return nfeatures, nimg_metas, targetn_
         else:
             return features, img_metas, None
-

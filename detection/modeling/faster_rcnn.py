@@ -119,7 +119,6 @@ class FasterRCNN(nn.Module):
         self.render_loss_7 = SSIM(data_range=1.0, win_size=7)
         self.iter_training_save = 0
         
-        
         ##################################
         self.image_gen_loss = ImageGenerationLoss()
         self.dis = Discriminator()
@@ -139,7 +138,6 @@ class FasterRCNN(nn.Module):
         #output dict
         outputs = dict()
         loss_dict = dict()
-        
         if self.training:
             #wheter to use use_moe and use_moe_fusion
             use_moe = False
@@ -216,18 +214,7 @@ class FasterRCNN(nn.Module):
                     #print(l1_loss_c)
 
 
-                    ##draw##
-                    import torchvision.utils as vutils
-                    name = str(self.draw_index).zfill(4)    
-                    #vutils.save_image(gate_mask_final.data, './samples/' + name +'.png', nrow=12, value_range=(-1, 1), normalize=True)
-                    #vis_images_all = torch.zeros((1, gate_mask_final.size(1), 4 * gate_mask_final.size(-2), gate_mask_final.size(-1))).to(output.device)
-                    #vis_images_all[:, :, 0:output.size(-2)] = save_im0[0:1]
-                    #vis_images_all[:, :, output.size(-2):output.size(-2)*2] = feats_0[0:1]
-                    #gate_mask_final_vis = torch.cat([gate_mask_final, tc_wei_dict[0]], dim=0)
-                    vutils.save_image(gate_mask_final.data, './samples/' + name +'_o.png', nrow=10, value_range=(-1, 1), normalize=True)
-                    vutils.save_image(tc_wei_dict[0].sigmoid().data, './samples/' + name +'_p.png', nrow=10, value_range=(-1, 1), normalize=True)
-            
-            ################e-net loss#####################
+                    ################e-net loss#####################
             elif mode_training == 8:
                 if stsc_trans is not None:
                     tc_images, img_metas, targets_, _ = self.tranformer_target(tc_images, stsc_images, img_metas, targets_, stsc_trans, None, vis=False)
@@ -267,13 +254,7 @@ class FasterRCNN(nn.Module):
                     l1_loss_c = class_hl_loss(tc_wei_dict[idx_wi], gate_mask_final)
                     loss_dict.update({'l1_loss_c'+str(idx_wi): 100 * l1_loss_c})
 
-                    import torchvision.utils as vutils
-                    
-                    name = str(0).zfill(4)    
-                    #gate_mask_final_vis = torch.cat([gate_mask_final, tc_wei_dict[0]], dim=0)
-                    vutils.save_image(gate_mask_final.data, './samples/' + name +'_aug_o.png', nrow=10, value_range=(-1, 1), normalize=True)
-                    vutils.save_image(tc_wei_dict[0].sigmoid().data, './samples/' + name +'_aug_p.png', nrow=10, value_range=(-1, 1), normalize=True)
-                self.draw_index = (self.draw_index + 1) % 10
+                    self.draw_index = (self.draw_index + 1) % 10
             
             #################render###################
             elif mode_training == 9:
@@ -383,34 +364,16 @@ class FasterRCNN(nn.Module):
                 loss_attn = 0.0
                 
                 for idx_attn in range(len(output_teacher_aug['attn'])):
-                    #log_x = torch.log(output_teacher_aug['attn'][idx_attn] + 1e-8) 
                     x = output_teacher_aug['attn'][idx_attn]
                     y = F.interpolate(output_teacher_aug['attn_masks'], size=(x.size(-2), x.size(-1)), mode='bilinear')  
-                    #y = y.squeeze(1).long()
-                    #loss_attn_ = F.nll_loss(log_x, y)
+                    if y.size(1) > 1:
+                        y = y[:, 0:1, :, :]
                     loss_attn_ = nll_loss_manual(x, y)
-                    #print(log_x.max(),log_x.min(), y.max(), log_x.min())
                     loss_attn += loss_attn_
-                #print(loss_attn)
                 loss_dict.update({'loss_attn': 0.1 * loss_attn})
                
-                ##################################
-                ###draw
-                self.iter_training_save = (self.iter_training_save + 1) % 2000
-                if self.iter_training_save % 20 == 0:
-                    vis_images_all = torch.zeros((1, output.size(1), 4 * output.size(-2), output.size(-1))).to(output.device)
-                    vis_images_all[:, :, 0:output.size(-2)] = tc_images[0:1]
-                    vis_images_all[:, :, output.size(-2):output.size(-2)*2] = (target[0:1] - 0.5) / 0.5 
-                    vis_images_all[:, :, 2*output.size(-2):output.size(-2)*3] = (output[0:1] - 0.5) / 0.5
-                    #vis_images_all[:, :, 3*output.size(-2):output.size(-2)*4] = (output[0:1] - 0.5) / 0.5
-                    #vis_images_all[:, :, 3*output.size(-2):output.size(-2)*4] = (output * mask)[0:1]
-
-                    import torchvision.utils as vutils
-                
-                    name = str(self.iter_training_save).zfill(4)    
-                    vutils.save_image(vis_images_all.data, './samples/loss/' + name +'.jpg', nrow=12, value_range=(-1, 1), normalize=True)
-            
             elif mode_training == 11:
+                
                 with torch.no_grad():
                        output_teacher = self.teacher(tc_images, img_metas, targets_, mode=8, moe_mode=0, update_norm_p=False, is_update=is_update)
                        fg_mask = generate_moe_mask_v4([tc_images], targets_, stride=1.0)[0]
@@ -521,23 +484,6 @@ class FasterRCNN(nn.Module):
                 
                 #self.dis(target)
                 
-                ###draw
-                self.iter_training_save = (self.iter_training_save + 1) % 2000
-                if self.iter_training_save % 40 == 0:
-                    vis_images_all = torch.zeros((1, output.size(1), 4 * output.size(-2), output.size(-1))).to(output.device)
-                    vis_images_all[:, :, 0:output.size(-2)] = tc_images[0:1]
-                    vis_images_all[:, :, output.size(-2):output.size(-2)*2] = (target[0:1] - 0.5) / 0.5 
-                    vis_images_all[:, :, 2*output.size(-2):output.size(-2)*3] = (output[0:1] - 0.5) / 0.5 
-                    #vis_images_all[:, :, 3*output.size(-2):output.size(-2)*4] = (output[0:1] - 0.5) / 0.5
-                    #vis_images_all[:, :, 3*output.size(-2):output.size(-2)*4] = (output * mask)[0:1]
-                    #tc_images
-
-                    import torchvision.utils as vutils
-                
-                    name = str(self.iter_training_save).zfill(4)    
-                    vutils.save_image(vis_images_all.data, './samples/loss/' + name +'.jpg', nrow=12, value_range=(-1, 1), normalize=True)
-                
-                
             return loss_dict, outputs_teacher
             
 
@@ -551,9 +497,6 @@ class FasterRCNN(nn.Module):
                 outputs = self.teacher(tc_images, img_metas, targets_, mode=1, moe_mode=moe_mode, moe_mark=moe_mark)
             else:
                 outputs = self.student(tc_images, img_metas, targets_, mode=1)
-            
-            #tc_aug_wei_dict = outputs['feat_dict']['weight_dict']
-            #self.save_img_v40(tc_images, tc_aug_wei_dict)
 
             return outputs['dets_w']
     

@@ -14,14 +14,18 @@ from detection.modeling.unet.Irender import *
 from detection.modeling.unet.MedianPool2d import MedianPool2d
 from detection.modeling.conV.tconV import tconV
 from detection.modeling.HDR.OURS.OHDR import AHDR
+from detection.modeling.norm.lib_pert import *
 
 from torchvision import transforms as v2
 import matplotlib.pyplot as plt
 
 _expmamba_operator = None
+_expmamba_failed = False
 
 def get_expmamba_operator_lazy():
-    global _expmamba_operator
+    global _expmamba_operator, _expmamba_failed
+    if _expmamba_failed:
+        return None
     if _expmamba_operator is None:
         try:
             from expmamba_operator import get_expmamba_operator
@@ -29,6 +33,7 @@ def get_expmamba_operator_lazy():
             print("✅ ExpoMamba算子初始化成功")
         except Exception as e:
             print(f"⚠️ ExpoMamba加载失败: {e}")
+            _expmamba_failed = True
             _expmamba_operator = None
     return _expmamba_operator
 
@@ -321,6 +326,48 @@ class SNorm(nn.Module):
                 output_dict = {'feature_dict': [final_feats], 'weight_dict': scores_mem}
                 return output, output_dict
 
+            elif moe_mode == 7:
+                # 空间分区域退化策略：雾天退化 + 夜晚退化 + 保留干净区域
+                # 单步渲染，不使用多步迭代
+                if moe_mark == 0:
+                    # 空间分区域退化：雾天偏向
+                    feats_raw = self.norm_back(feats)
+                    feats_deg0, feats_deg1, feats_guide = spatial_fog_night_degrade(feats_raw)
+                    attn_masks = torch.ones_like(feats_raw)
+                    output, out_dicts = self.render_net(feats_deg0, feats_deg1, feats_guide)
+
+                elif moe_mark == 1:
+                    # 空间分区域退化：随机交换两版本位置
+                    feats_raw = self.norm_back(feats)
+                    feats_deg0, feats_deg1, feats_guide = spatial_fog_night_degrade(feats_raw)
+                    attn_masks = torch.ones_like(feats_raw)
+                    loc_mark = random.randint(0, 1)
+                    if loc_mark == 0:
+                        output, out_dicts = self.render_net(feats_deg1, feats_deg0, feats_guide)
+                    else:
+                        output, out_dicts = self.render_net(feats_deg0, feats_deg1, feats_guide)
+
+                elif moe_mark == 2:
+                    # 更强退化：增加退化强度
+                    feats_raw = self.norm_back(feats)
+                    feats_deg0, feats_deg1, feats_guide = spatial_fog_night_degrade(feats_raw)
+                    # 二次退化增强
+                    feats_deg0, _, _ = spatial_fog_night_degrade(feats_deg0)
+                    feats_deg1, _, _ = spatial_fog_night_degrade(feats_deg1)
+                    attn_masks = torch.ones_like(feats_raw)
+                    output, out_dicts = self.render_net(feats_deg0, feats_deg1, feats_guide)
+
+                else:
+                    # 轻微退化：仅施加单种退化
+                    feats_raw = self.norm_back(feats)
+                    feats_deg0, feats_deg1, feats_guide = spatial_fog_night_degrade(feats_raw)
+                    # 用原始特征作为guide，减少退化干扰
+                    output, out_dicts = self.render_net(feats_deg0, feats_deg1, feats_raw)
+                    attn_masks = torch.ones_like(feats_raw)
+
+                output_dict = {'feature_dict':[None], 'weight_dict':[None], 'attn':out_dicts['attn'], 'attn_masks':attn_masks}
+                return output, output_dict
+
             ################## wo transformation ####################
             elif moe_mode == 100:
                 feats_0 = self.user_norm_v2(feats, mode=0, kernel_sz_set=[1, 1], w_a=1.0, w_u=1.0, ema=1.0)
@@ -548,28 +595,28 @@ class SNorm(nn.Module):
             
             # Step 1: 初始AHDR渲染
             output = self.render_net(feats_mem[0], save_im0, feats_mem[1])
-            # output = output * 0.9 + save_im0 * 0.1
+            output = output * 0.9 + save_im0 * 0.1
             
             # Step 2
             output = self.render_net(feats_mem[1], output, feats_mem[3])
-            # output = output * 0.9 + save_im0 * 0.1
+            output = output * 0.9 + save_im0 * 0.1
             
             # Step 3
             output = self.render_net(feats_mem[2], output, feats_mem[3])
-            # output = output * 0.9 + save_im0 * 0.1
+            output = output * 0.9 + save_im0 * 0.1
             
             # Step 4
             output = self.render_net(feats_mem[3], output, feats_mem[3])
-            # output = output * 0.9 + save_im0 * 0.1
+            output = output * 0.9 + save_im0 * 0.1
             
             # Step 5
             output = self.render_net(feats_mem[4], output, feats_mem[3])
-            # output = output * 0.9 + save_im0 * 0.1
+            output = output * 0.9 + save_im0 * 0.1
             
             # Step 6: 引入ExpoMamba方法进行融合
             # 将原始5步AHDR输出与ExpoMamba特征进行融合
-            output = 0.5 * output + 0.5 * feats_mem[5]
-            # output = output * 0.9 + save_im0 * 0.1
+            output = self.render_net(feats_mem[5], output, feats_mem[3])
+            output = output * 0.9 + save_im0 * 0.1
             #medpool_0 =  MedianPool2d(kernel_size=3, stride=1, padding=1)
             #output = medpool_0(output)
             output = self.norm_forward(output)
@@ -646,8 +693,9 @@ class SNorm(nn.Module):
         return
 
     def compute_norm_parameters(self, device=None):
-        alpha_ba = torch.from_numpy(self.memory_aplpha_a[0:self.memory_loc].sum(axis=0) / self.memory_loc)
-        alpha_bu = torch.from_numpy(self.memory_aplpha_u[0:self.memory_loc].sum(axis=0) / self.memory_loc)
+        mem_count = max(self.memory_index, 1)
+        alpha_ba = torch.from_numpy(self.memory_aplpha_a[0:mem_count].sum(axis=0) / mem_count)
+        alpha_bu = torch.from_numpy(self.memory_aplpha_u[0:mem_count].sum(axis=0) / mem_count)
         alpha_ba = alpha_ba.to(device)
         alpha_bu = alpha_bu.to(device)
         self.alpha_ba.data = self.alpha_ba.data.clone().detach() * 0.0 + alpha_ba.clone().detach()
@@ -1315,4 +1363,3 @@ def calc_mean_std_batch(feat, eps=1e-8):
     feat_std = feat_var.sqrt().view(C, 1, 1)
     feat_mean = feat.view(N, C, -1).mean(dim=2).view(N, C, 1, 1)
     return feat_mean, feat_std
-

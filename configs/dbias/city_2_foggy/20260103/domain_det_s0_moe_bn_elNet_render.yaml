@@ -21,7 +21,7 @@ MODEL:
     UPDATE_STUDENT_MARK: True
     UPDATE_TEACHER_MARK: True
 DATALOADER:
-  NUM_WORKERS: 1
+  NUM_WORKERS: 0
 ADV:
   LAYERS: [False, False, True]
   DIS_MODEL:
@@ -36,9 +36,7 @@ DATASETS:
   TARGETS: ['bdd_daytime_clear_train']
   #TESTS: ['bdd_daytime_clear_test','bdd_daytime_fog_test']
   #TESTS: ['bdd_daytime_clear_train',]
-  TESTS: ['bdd_daytime_fog_test']
-  #TESTS: ['bdd_daytime_fog_test', 'bdd_night_sun_test']
-  #TESTS: ['bdd_night_sun_test']
+  TESTS: ['bdd_daytime_fog_test', 'bdd_night_sun_test']
 INPUT:
   TRANSFORMS_TRAIN:
     - name: 'random_flip'

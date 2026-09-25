@@ -1,0 +1,8 @@
+bus             : AP: 0.4400, RECALL: 0.8065
+bike            : AP: 0.4126, RECALL: 0.7297
+car             : AP: 0.6094, RECALL: 0.7097
+motor           : AP: 0.1804, RECALL: 0.6947
+person          : AP: 0.4386, RECALL: 0.6643
+rider           : AP: 0.3154, RECALL: 0.6584
+truck           : AP: 0.4448, RECALL: 0.7914
+mAP: 0.4059, mREC: 0.7221

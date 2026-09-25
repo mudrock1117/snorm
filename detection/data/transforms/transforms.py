@@ -146,16 +146,15 @@ class normalize(object):
                             AdjustBrightness(0.6)]
         '''
         transfer_hd = [AdjustGamma(0.3),
-                        AdjustSaturation(0.3),
-                        AdjustContrast(0.2),
-                        AdjustSharpness(0.2),
-                        AdjustBrightness(0.2)]
+                AdjustSaturation(0.3),
+                AdjustContrast(0.2),
+                AdjustSharpness(0.2),
+                AdjustBrightness(0.2),
+                RandGaussianBlur(radius=[0.1, 2.0], p=0.35),
+                IaRandGaussianNoise_v1(p=0.35)]
              
         if random.random() < 0.2:
             transfer_hd += [Iaaa_Color()]
-        transfer_hd += [RandomLSized(RESIZE, SCALE_SZ0),
-                        CenterCrop(RCROP),
-                        RandomHorizontallyFlip(0.15)]
         aug_scale = Compose(transfer_hd)
         
         

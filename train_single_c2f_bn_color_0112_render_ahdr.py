@@ -8,7 +8,13 @@ import random
 import signal
 import numpy as np
 
+# CUDA预初始化：在任何其他导入之前初始化CUDA，防止tensorflow导入失败污染CUDA上下文
+os.environ.setdefault('CUDA_VISIBLE_DEVICES', '0')
+# 降低显存碎片化风险：限制单次分配上限，避免大块分裂
+os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'max_split_size_mb:128')
 import torch
+torch.cuda.init()  # 显式初始化CUDA上下文
+torch.cuda.synchronize()  # 确保CUDA就绪
 import torchvision
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel
@@ -38,6 +44,10 @@ sample_index_iter = 0
 global_step_gan = 0
 is_update_memory = False
 
+current_foggy_mAP = 0.0
+current_night_mAP = 0.0
+best_sum_mAP = 0.0
+best_mAP = 0.0
 
 ###memory module
 def normalize_image(x):
@@ -147,6 +157,12 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
         global_step += 1
         global_start += 1
         start_time = time.time()
+        
+        _max_iters = getattr(det_cfg.SOLVER, "MAX_ITERS_EARLY_STOP", 0)
+        if _max_iters > 0 and global_step >= _max_iters:
+            print(f"[EARLY-STOP] global_step={global_step} >= MAX_ITERS_EARLY_STOP={_max_iters}, breaking.")
+            global_end = True
+            break
         for optimizer in optimizers:
             optimizer.zero_grad()
          
@@ -194,28 +210,31 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
             '''
 
             ###image render###
-            
+
             loss_dict_s3, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, \
                                         moe_mark=0, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
-            
+
             det_loss_s3 = 100 * sum(list(loss_dict_s3.values()))
             det_loss_s3.backward()
-            
+
+            ##################
+            torch.nn.utils.clip_grad_norm_(model_det.parameters(), max_norm=1.0)
+
             '''
             loss_dict_s4, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, \
                                         moe_mark=1, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
-            
+
             det_loss_s4 = 100 * sum(list(loss_dict_s4.values()))
             det_loss_s4.backward()
-            
+
             '''
             loss_dict_s5, _ = model_det(images, img_metas, s_targets, mode_training=11, outputs_teacher=None, \
                                         moe_mark=2, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
-            
+
             det_loss_s5 = 100 * sum(list(loss_dict_s5.values()))
             det_loss_s5.backward()
-            
-            
+
+
             #loss_dict_s5, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, \
             #                            moe_mark=2, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
             #
@@ -225,8 +244,12 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
             #metric_logger.update(det_loss_s1=det_loss_s3)
             metric_logger.update(det_loss_s=det_loss_s3)
             metric_logger.update(det_loss_s3=det_loss_s3)
-            metric_logger.update(det_loss_attn=loss_dict_s3['loss_attn'])
+            loss_attn_val = loss_dict_s3.get('loss_attn', torch.tensor(0.0))
+            metric_logger.update(det_loss_attn=loss_attn_val)
+            
             #del det_loss_s3, loss_dict_s3
+            import gc
+            gc.collect()
             torch.cuda.empty_cache()
             ##################
 
@@ -285,10 +308,9 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
 
         if global_step % (1000 // max(1, (dist_utils.get_world_size() // 2))) == 0 and test_func is not None:
             updated = test_func()
-            #save_func('model_iter_{:02d}.pth'.format(global_step))
             if updated:
-                save_func('best.pth', 'mAP: {:.4f}'.format(best_mAP))
-            print('Best mAP: {:.4f}'.format(best_mAP))
+                save_func('best.pth', 'sum_mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
+            print('Best sum mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
 
     if det_cfg.MODEL.MODE.TRAIN_PROCESS == 'S1' and det_cfg.MODEL.MODE.UPDATE_TEACHER_MARK and epoch >= 0:
         if hasattr(model_det, 'module'):
@@ -296,11 +318,23 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
         else:
             model_det.update_teacher(NET_MOMENTUM=motum_lr)
     
+    model_inner = model_det.module if hasattr(model_det, 'module') else model_det
+    snorm_modules = []
+    for name, m in model_inner.named_modules():
+        if type(m).__name__ == 'SNorm':
+            snorm_modules.append((name, m))
+    for name, m in snorm_modules:
+        m._clip_internal_params()
+        if m.check_nan():
+            print(f"[Epoch {epoch}] WARNING: SNorm '{name}' detected NaN/Inf in alpha params, resetting EMA...")
+            m.reset_ema()
+        print(f"[Epoch {epoch}] SNorm '{name}': alpha_ba={m.alpha_ba.data.cpu().numpy()}, alpha_bu={m.alpha_bu.data.cpu().numpy()}")
+
     if hasattr(model_det, 'module'):
         model_det.module.teacher.proj_norm.compute_norm_parameters(device=device)
     else:
         model_det.teacher.proj_norm.compute_norm_parameters(device=device)
-    
+
 def main(det_cfg, args):
     print('----num_workers:', det_cfg.DATALOADER.NUM_WORKERS)
     
@@ -354,9 +388,10 @@ def main(det_cfg, args):
           model_paramters += [{'params': model_without_ddp.teacher.proj_norm.render_net.parameters(),'lr':det_cfg.SOLVER.LR}]
           model_paramters += [{'params': model_without_ddp.dis.parameters(),'lr':det_cfg.SOLVER.LR}]
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
-
+          _total_epochs = det_cfg.SOLVER.EPOCHS
+          _t_max = max(1, _total_epochs * len(train_loader))
           schedulers = [
-             torch.optim.lr_scheduler.MultiStepLR(optimizer_model, det_cfg.SOLVER.STEPS, gamma=det_cfg.SOLVER.GAMMA),
+             torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_model, T_max=_t_max, eta_min=1e-6),
           ]
 
           optimizers = [optimizer_model]
@@ -404,19 +439,30 @@ def main(det_cfg, args):
             target_loader.batch_sampler.sampler.set_epoch(epoch)
 
         def test_func():
-            global best_mAP
+            global best_mAP, current_foggy_mAP, current_night_mAP, best_sum_mAP
             updated = False
-            #print(work_dir)
             model_det.eval()
             metrics = evaluation(model_det, test_loaders, device, det_cfg.TEST.EVAL_TYPES, output_dir=work_dir, iteration=global_step)
             if dist_utils.is_main_process() and losses_writer:
                 for dataset_name, metric in metrics.items():
                     for k, v in metric.items():
                         metrics_writers[dataset_name].add_scalar('metrics/' + k, v, global_step=global_step)
-                        if k == 'mAP' and v > best_mAP:
-                        #if k == 'AP' and v > best_mAP:
-                            best_mAP = v
-                            updated = True
+                        if k == 'mAP':
+                            if 'fog' in dataset_name.lower():
+                                current_foggy_mAP = v
+                            elif 'night' in dataset_name.lower():
+                                current_night_mAP = v
+                if current_foggy_mAP > 0.4 and current_night_mAP > 0.4:
+                    current_sum = current_foggy_mAP + current_night_mAP
+                    if current_sum > best_sum_mAP:
+                        best_sum_mAP = current_sum
+                        best_mAP = current_sum
+                        updated = True
+                        print('Both foggy ({:.4f}) and night ({:.4f}) mAP > 0.4, sum improved to {:.4f}'.format(
+                            current_foggy_mAP, current_night_mAP, current_sum))
+                else:
+                    print('Waiting for both foggy ({:.4f}) and night ({:.4f}) mAP to reach 0.4'.format(
+                        current_foggy_mAP, current_night_mAP))
             model_det.train()
             return updated
 
@@ -442,11 +488,10 @@ def main(det_cfg, args):
  
         #if epoch> 0 and epoch % 4 ==0:
         if epoch > -1:
-            #test_func()
             updated = test_func()
             if updated:
-                save_func('best.pth', 'mAP: {:.4f}'.format(best_mAP))
-            print('Best mAP: {:.4f}'.format(best_mAP))
+                save_func('best.pth', 'sum_mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
+            print('Best sum mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
             
         #if epoch > 10:
         if epoch > -1:
