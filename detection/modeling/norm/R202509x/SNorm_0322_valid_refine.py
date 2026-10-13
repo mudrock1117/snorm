@@ -19,25 +19,6 @@ from detection.modeling.norm.lib_pert import *
 from torchvision import transforms as v2
 import matplotlib.pyplot as plt
 
-_expmamba_operator = None
-_expmamba_failed = False
-
-def get_expmamba_operator_lazy():
-    global _expmamba_operator, _expmamba_failed
-    if _expmamba_failed:
-        return None
-    if _expmamba_operator is None:
-        try:
-            from expmamba_operator import get_expmamba_operator
-            _expmamba_operator = get_expmamba_operator()
-            print("✅ ExpoMamba算子初始化成功")
-        except Exception as e:
-            print(f"⚠️ ExpoMamba加载失败: {e}")
-            _expmamba_failed = True
-            _expmamba_operator = None
-    return _expmamba_operator
-
-
 class SNorm(nn.Module):
     """
     0318-op 版本：
@@ -520,36 +501,11 @@ class SNorm(nn.Module):
                 return output, output_dict
 
         else:
-            
             _ablation = os.environ.get('SNORM_ABLATION', 'full')
-            
-            if _ablation == 'passthrough':
-                return feats, {'feature_dict': [feats], 'weight_dict': [None]}
-            
-            if _ablation == 'norm_only':
-                _e = float(os.environ.get('SNORM_EMA', '0.85'))
-                feats_norm = self.user_norm_v2(feats, mode=0, kernel_sz_set=[1,1], w_a=1.0, w_u=1.0, ema=1.0)
-                return feats_norm, {'feature_dict': [feats_norm], 'weight_dict': [None]}
-            
-            if _ablation == 'src_norm':
-                _e = float(os.environ.get('SNORM_EMA', '0.85'))
-                feats_norm = self.user_norm_v2(feats, mode=0, kernel_sz_set=[1,1], w_a=1.0, w_u=1.0, ema=0.0)
-                return feats_norm, {'feature_dict': [feats_norm], 'weight_dict': [None]}
-            
+
             feats_0 = self.user_norm_v2(feats, mode=0, kernel_sz_set=[1,1], w_a=1.0, w_u=1.0, ema=0.0)
             save_im0 = feats_0.clone()
 
-            kernel_sz_set0 = [
-                    [3,5],
-                    [5,3],
-                    [7,11],
-                    [11,7],
-                    #[11, 21],
-                    #[21, 11],
-                    #[10, 20],
-                    #[20, 10],
-                    [13, 13]
-            ]
             _kernel_mode = os.environ.get('SNORM_KERNEL_MODE', 'default')
             if _kernel_mode == 'default':
                 kernel_sz_set = [
@@ -583,59 +539,36 @@ class SNorm(nn.Module):
                 kernel_sz_set = [
                     [3,3],[7,7],[11,11],[15,15],[19,19]
                 ]
-            
 
             w_au = [
                     [1.0, 1.0, 0.5],
-                    #[1.0, 1.0, 0.5],
-                    #[1.0, 1.0, 0.9],
-                    #[0.9, 1.0, 0.7],
-                    #[1.1, 1.0, 0.7],
-                    #[1.0, 0.8, 0.7],
-                    #[1.0, 1.2, 0.7],
             ]
 
-                
-            #005
-            error_thresh_0 = 0.0
-            error_thresh_1 = 0.0
-
-            ##########
-            #scores_up = scores_w0.clone() * 1.0
-            final_mask = torch.zeros((1, feats_0.size(1), feats_0.size(-2), feats_0.size(-1))).to(feats_0.device)
-            medpool_0 = nn.MaxPool2d(kernel_size=3, stride=1, padding=1) #40.9
-            medpool_1 = nn.MaxPool2d(kernel_size=11, stride=1, padding=5) #41.2
-
-            #scores_w0 = medpool_0(scores_w0)
-            #scores_up = medpool_0(scores_up)
-       
             feats_mem = []
-            scores_mem = []
             for idx_k in range(len(w_au)):
-                    for idx_ in range(len(kernel_sz_set)):
-                        _ema_eval = float(os.environ.get('SNORM_EMA', '0.85'))
-                        feats_ = self.user_norm_v2(feats_0,  kernel_sz_set=kernel_sz_set[idx_], w_a=w_au[idx_k][0], w_u=w_au[idx_k][1], ema=_ema_eval, eps=1e-5)
-                        #feats_ = self.local_bright_contrast(feats_0,  kernel_sz_set=kernel_sz_set[idx_])
-                        feats_ = self.norm_back(feats_)
-                        feats_mem.append(feats_)
-            
-            # 添加ExpoMamba特征（确保feats_mem有6个元素）
-            expmamba_op = get_expmamba_operator_lazy()
-            feats_ori = self.norm_back(feats)
-            if expmamba_op is not None:
-                # 使用ExpoMamba增强
-                feats_exp = expmamba_op.enhance_tensor(feats_ori)
-                feats_mem.append(feats_exp)
-            else:
-                # 如果ExpoMamba加载失败，用原始特征代替
-                feats_mem.append(feats_ori)
-                
+                for idx_ in range(len(kernel_sz_set)):
+                    _ema_eval = float(os.environ.get('SNORM_EMA', '0.85'))
+                    feats_ = self.user_norm_v2(feats_0, kernel_sz_set=kernel_sz_set[idx_],
+                                               w_a=w_au[idx_k][0], w_u=w_au[idx_k][1],
+                                               ema=_ema_eval, eps=1e-5)
+                    feats_ = self.norm_back(feats_)
+                    feats_mem.append(feats_)
+
+            feats_mem.append(self.norm_back(feats))
+
             save_im0 = self.norm_back(save_im0)
-            
+
             _res_w = float(os.environ.get('SNORM_RES_W', '0.9'))
             _steps = int(os.environ.get('SNORM_STEPS', '6'))
-            
-            if _ablation == 'no_ahdr':
+
+            if _ablation == 'passthrough':
+                output = feats
+                output_dict = {'feature_dict': feats_mem, 'weight_dict': [None]}
+                return output, output_dict
+
+            if _ablation == 'norm_only':
+                output = save_im0
+            elif _ablation == 'no_ahdr':
                 output = save_im0
             elif _ablation == 'single_ahdr':
                 output = self.render_net(feats_mem[0], save_im0, feats_mem[1])
@@ -643,46 +576,29 @@ class SNorm(nn.Module):
             else:
                 output = self.render_net(feats_mem[0], save_im0, feats_mem[1])
                 output = output * _res_w + save_im0 * (1 - _res_w)
-                
+
                 if _steps >= 2:
                     output = self.render_net(feats_mem[1], output, feats_mem[3])
                     output = output * _res_w + save_im0 * (1 - _res_w)
-                
+
                 if _steps >= 3:
                     output = self.render_net(feats_mem[2], output, feats_mem[3])
                     output = output * _res_w + save_im0 * (1 - _res_w)
-                
+
                 if _steps >= 4:
                     output = self.render_net(feats_mem[3], output, feats_mem[3])
                     output = output * _res_w + save_im0 * (1 - _res_w)
-                
+
                 if _steps >= 5:
                     output = self.render_net(feats_mem[4], output, feats_mem[3])
                     output = output * _res_w + save_im0 * (1 - _res_w)
-                
+
                 if _steps >= 6 and len(feats_mem) >= 6:
                     output = self.render_net(feats_mem[5], output, feats_mem[3])
                     output = output * _res_w + save_im0 * (1 - _res_w)
-            #medpool_0 =  MedianPool2d(kernel_size=3, stride=1, padding=1)
-            #output = medpool_0(output)
+
             output = self.norm_forward(output)
-            #output = self.user_norm_v2(output, mode=0, kernel_sz_set=[1,1], w_a=1.0, w_u=1.0, ema=0.9)
-            output_dict = {'feature_dict':feats_mem, 'weight_dict':[None]}
-            
-            save_im0 = self.norm_forward(save_im0)
-            save_im0 = self.norm_forward(save_im0)
-            #output = output * 0.1 + 0.9 * save_im0
-            
-            
-            #feats_0 = self.user_norm_v2(feats, mode=0, kernel_sz_set=[1,1], w_a=1.0, w_u=1.0, ema=0.9)
-            #output = feats
-            #output_dict = None
-            #print(feats.mean(), output.mean())
-            #output = output * 0.8 + 0.2 * feats
-            
-            #output = output * 1.0 + 0.0 * save_im0
-            
-            
+            output_dict = {'feature_dict': feats_mem, 'weight_dict': [None]}
             return output, output_dict
 
     ############################
@@ -1228,7 +1144,6 @@ class SNorm(nn.Module):
         多尺度特征融合函数：
         1) 多尺度 user_norm_v2 变换
         2) local_gamma_night 夜景增强
-        3) ExpoMamba 频域增强（新增第四种方法）
         所有候选通过 weight_gen_unet2 打分，Top-K Softmax 加权融合。
         """
 
@@ -1272,14 +1187,6 @@ class SNorm(nn.Module):
                 kernel_sz=kernel_sz,
             )
             feats_all.append(feats_gamma)
-
-        # 3) ExpoMamba 频域增强（新增第四种方法）
-        expmamba_op = get_expmamba_operator_lazy()
-        if expmamba_op is not None:
-            feats_exp = feats * 0.5 + 0.5
-            feats_exp = expmamba_op.enhance_tensor(feats_exp)
-            feats_exp = feats_exp * 2.0 - 1.0
-            feats_all.append(feats_exp)
 
         medpool_1 = nn.MaxPool2d(kernel_size=13, stride=1, padding=6)
         feats_mem = []
