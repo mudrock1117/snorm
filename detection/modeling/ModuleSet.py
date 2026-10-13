@@ -75,7 +75,7 @@ class ModuleSet(nn.Module):
         self.box_head_norm = BoxHead(cfg, in_channels)
 
         if cfg.MODEL.MODE.PJOTYPE == 'BN':
-            self.pjo_ops = I2ITienhance()
+            pass
         elif cfg.MODEL.MODE.PJOTYPE == 'NBIAS':
             #base: 0000_1116.log
             #self.proj_norm = nn.BatchNorm2d(512)
@@ -246,6 +246,8 @@ class ModuleSet(nn.Module):
                 
             features_norm, feat_dict = self.dist_prog(features_prev.detach(), targets, stride=8, domain=domain, \
             use_dbiase=use_dbiase, moe_mode=moe_mode, moe_mark=moe_mark)
+            # 保存渲染结果用于评估可视化
+            self._last_render_features = features_norm.detach()
             #features_norm = features_prev
             #feat_dict = None
             features_w = self.back_norm_w_snorm(features_norm)
@@ -507,22 +509,11 @@ class ModuleSet(nn.Module):
             outputs['dets_w'] = dets_w
             outputs['features_wo'] = features_wo
             outputs['features_norm'] = features_norm
-            if 'attn' in feat_dict.keys():
-                outputs['attn'] = feat_dict['attn']
-            if 'attn_masks' in feat_dict.keys():
-                outputs['attn_masks'] = feat_dict['attn_masks']
-            if 'fused_feats' in feat_dict.keys():
-                outputs['fused_feats'] = feat_dict['fused_feats']
-            if 'residual' in feat_dict.keys():
-                outputs['residual'] = feat_dict['residual']
-            if 'local_feats_0' in feat_dict.keys():
-                outputs['local_feats_0'] = feat_dict['local_feats_0']
-            if 'local_feats_1' in feat_dict.keys():
-                outputs['local_feats_1'] = feat_dict['local_feats_1']
-            if 'encoder_f0' in feat_dict.keys():
-                outputs['encoder_f0'] = feat_dict['encoder_f0']
-            if 'encoder_f1' in feat_dict.keys():
-                outputs['encoder_f1'] = feat_dict['encoder_f1']
+            if feat_dict is not None:
+                if 'attn' in feat_dict.keys():
+                    outputs['attn'] = feat_dict['attn']
+                if 'attn_masks' in feat_dict.keys():
+                    outputs['attn_masks'] = feat_dict['attn_masks']
 
         outputs['feat_dict'] = feat_dict
             
@@ -530,7 +521,16 @@ class ModuleSet(nn.Module):
     
     def dist_prog(self, x, targets, stride=8, use_dbiase=False, domain='source', use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=0):
         if self.cfg.MODEL.MODE.PJOTYPE == 'BN':
-            self.pjo_ops = I2ITienhance()
+            _empty = {
+                'feature_dict': [],
+                'feature_dict_per': [],
+                'feature_dict_fused': [],
+                'weight_dict': [],
+                'win_sz_set': [],
+                'attn': [],
+                'attn_masks': None,
+            }
+            return x, _empty
         elif self.cfg.MODEL.MODE.PJOTYPE == 'NBIAS':
             nx, feat_dict = self.proj_norm(x, use_moe=use_moe, use_moe_fusion=use_moe_fusion, moe_mode=moe_mode, moe_mark=moe_mark)
             if  use_dbiase:

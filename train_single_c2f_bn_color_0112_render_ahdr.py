@@ -188,70 +188,50 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
             is_update = False
             if epoch ==0 and global_step == 1:
                 is_update = True
-            '''
-            #mode=0, detector and gated network
-            loss_dict_s0, outputs_s = model_det(tr_images, img_metas, s_targets, mode_training=7, step_iter=global_step, \
-                                                is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
-            det_loss_s0 = sum(list(loss_dict_s0.values()))
-            det_loss_s0.backward()
-            metric_logger.update(det_loss_s=det_loss_s0)
-            del det_loss_s0, loss_dict_s0, outputs_s
-            torch.cuda.empty_cache()
+            if det_cfg.MODEL.MODE.PJOTYPE == 'BN':
+                loss_dict_s0, outputs_s = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, \
+                                                    is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
+                det_loss_s0 = sum(list(loss_dict_s0.values()))
+                det_loss_s0.backward()
+                metric_logger.update(det_loss_s=det_loss_s0)
+                del det_loss_s0, loss_dict_s0, outputs_s
+                torch.cuda.empty_cache()
+            else:
+                '''
+                loss_dict_s0, outputs_s = model_det(tr_images, img_metas, s_targets, mode_training=7, step_iter=global_step, \
+                                                    is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
+                det_loss_s0 = sum(list(loss_dict_s0.values()))
+                det_loss_s0.backward()
+                metric_logger.update(det_loss_s=det_loss_s0)
+                del det_loss_s0, loss_dict_s0, outputs_s
+                torch.cuda.empty_cache()
+                '''
 
-            #mode=3, distru
-            loss_dict_s2, _ = model_det(tr_images, img_metas, s_targets, mode_training=8, outputs_teacher=None, \
-                                        stsc_images=sc_images, stsc_trans=sc_trans, step_iter=global_step)
-            det_loss_s2 = sum(list(loss_dict_s2.values()))
-            det_loss_s2.backward()
-   
-            metric_logger.update(det_loss_s2=det_loss_s2)
-            del det_loss_s2, loss_dict_s2
-            torch.cuda.empty_cache()
-            '''
+                ###image render###
 
-            ###image render###
+                loss_dict_s3, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, \
+                                            moe_mark=0, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
 
-            loss_dict_s3, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, \
-                                        moe_mark=0, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
+                det_loss_s3 = 100 * sum(list(loss_dict_s3.values()))
+                det_loss_s3.backward()
 
-            det_loss_s3 = 100 * sum(list(loss_dict_s3.values()))
-            det_loss_s3.backward()
+                ##################
+                torch.nn.utils.clip_grad_norm_(model_det.parameters(), max_norm=1.0)
 
-            ##################
-            torch.nn.utils.clip_grad_norm_(model_det.parameters(), max_norm=1.0)
+                loss_dict_s5, _ = model_det(images, img_metas, s_targets, mode_training=11, outputs_teacher=None, \
+                                            moe_mark=2, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
 
-            '''
-            loss_dict_s4, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, \
-                                        moe_mark=1, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
+                det_loss_s5 = 100 * sum(list(loss_dict_s5.values()))
+                det_loss_s5.backward()
 
-            det_loss_s4 = 100 * sum(list(loss_dict_s4.values()))
-            det_loss_s4.backward()
-
-            '''
-            loss_dict_s5, _ = model_det(images, img_metas, s_targets, mode_training=11, outputs_teacher=None, \
-                                        moe_mark=2, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
-
-            det_loss_s5 = 100 * sum(list(loss_dict_s5.values()))
-            det_loss_s5.backward()
-
-
-            #loss_dict_s5, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, \
-            #                            moe_mark=2, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
-            #
-            #det_loss_s5 = 100 * sum(list(loss_dict_s5.values()))
-            #det_loss_s5.backward()
-            #torch.nn.utils.clip_grad_norm_(model_det.parameters(), 0.5)
-            #metric_logger.update(det_loss_s1=det_loss_s3)
-            metric_logger.update(det_loss_s=det_loss_s3)
-            metric_logger.update(det_loss_s3=det_loss_s3)
-            loss_attn_val = loss_dict_s3.get('loss_attn', torch.tensor(0.0))
-            metric_logger.update(det_loss_attn=loss_attn_val)
-            
-            #del det_loss_s3, loss_dict_s3
-            import gc
-            gc.collect()
-            torch.cuda.empty_cache()
-            ##################
+                metric_logger.update(det_loss_s=det_loss_s3)
+                metric_logger.update(det_loss_s3=det_loss_s3)
+                loss_attn_val = loss_dict_s3.get('loss_attn', torch.tensor(0.0))
+                metric_logger.update(det_loss_attn=loss_attn_val)
+                
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
 
             for optimizer in optimizers:
                 optimizer.step()
@@ -330,10 +310,12 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
             m.reset_ema()
         print(f"[Epoch {epoch}] SNorm '{name}': alpha_ba={m.alpha_ba.data.cpu().numpy()}, alpha_bu={m.alpha_bu.data.cpu().numpy()}")
 
-    if hasattr(model_det, 'module'):
-        model_det.module.teacher.proj_norm.compute_norm_parameters(device=device)
-    else:
-        model_det.teacher.proj_norm.compute_norm_parameters(device=device)
+    _pjotype = det_cfg.MODEL.MODE.PJOTYPE
+    if _pjotype != 'BN':
+        if hasattr(model_det, 'module'):
+            model_det.module.teacher.proj_norm.compute_norm_parameters(device=device)
+        else:
+            model_det.teacher.proj_norm.compute_norm_parameters(device=device)
 
 def main(det_cfg, args):
     print('----num_workers:', det_cfg.DATALOADER.NUM_WORKERS)
@@ -385,8 +367,11 @@ def main(det_cfg, args):
     model_paramters = []
     model_eval_parameters = []
     if det_cfg.MODEL.MODE.TRAIN_PROCESS == 'S0':
-          model_paramters += [{'params': model_without_ddp.teacher.proj_norm.render_net.parameters(),'lr':det_cfg.SOLVER.LR}]
-          model_paramters += [{'params': model_without_ddp.dis.parameters(),'lr':det_cfg.SOLVER.LR}]
+          if det_cfg.MODEL.MODE.PJOTYPE == 'BN':
+              model_paramters += [{'params': model_without_ddp.teacher.parameters(),'lr':det_cfg.SOLVER.LR}]
+          else:
+              model_paramters += [{'params': model_without_ddp.teacher.proj_norm.render_net.parameters(),'lr':det_cfg.SOLVER.LR}]
+              model_paramters += [{'params': model_without_ddp.dis.parameters(),'lr':det_cfg.SOLVER.LR}]
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
           _total_epochs = det_cfg.SOLVER.EPOCHS
           _t_max = max(1, _total_epochs * len(train_loader))
@@ -398,14 +383,18 @@ def main(det_cfg, args):
           optimizers_evaluation = []
 
     else:
-          model_paramters += [{'params': model_without_ddp.student.backbone.parameters(),'lr':det_cfg.SOLVER.LR}]
-          model_paramters += [{'params': model_without_ddp.student.rpn.parameters(),'lr':det_cfg.SOLVER.LR}]
-          for name, module in model_without_ddp.student.box_head.named_children():
-            model_paramters += [{'params': module.parameters(),'lr':det_cfg.SOLVER.LR}]
-
+          if det_cfg.MODEL.MODE.PJOTYPE == 'BN':
+              _base = model_without_ddp.teacher
+              model_paramters += [{'params': _base.parameters(),'lr':det_cfg.SOLVER.LR}]
+          else:
+              _base = model_without_ddp.student if hasattr(model_without_ddp, 'student') else model_without_ddp.teacher
+              model_paramters += [{'params': _base.backbone.parameters(),'lr':det_cfg.SOLVER.LR}]
+              model_paramters += [{'params': _base.rpn.parameters(),'lr':det_cfg.SOLVER.LR}]
+              for name, module in _base.box_head.named_children():
+                model_paramters += [{'params': module.parameters(),'lr':det_cfg.SOLVER.LR}]
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
           schedulers = [
-             torch.optim.lr_scheduler.MultiStepLR(optimizer_model, det_cfg.SOLVER.STEPS, gamma=det_cfg.SOLVER.GAMMA),
+             torch.optim.lr_scheduler.MultiStepLR(optimizer_model, det_cfg.SOLVER.STEPS, gamma=det_cfg.SOLVER.GAMMA)
           ]
           optimizers = [optimizer_model]
 

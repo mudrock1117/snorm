@@ -339,7 +339,8 @@ def main():
     parser.add_argument('--output-dir', type=str, default=None)
     args = parser.parse_args()
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
+    if 'CUDA_VISIBLE_DEVICES' not in os.environ:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(args.gpu)
 
     print('=' * 70)
     print(' Ensemble Inference for Cross-Domain Detection')
