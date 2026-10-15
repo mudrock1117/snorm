@@ -39,3 +39,9 @@ test_*.py
 *.swp
 *.swo
 *~
+# 步骤6消融分析
+debug_step6_analysis/
+.marscode/
+
+# 临时文件
+is -maxdepth*

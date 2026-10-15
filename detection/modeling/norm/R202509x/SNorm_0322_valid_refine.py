@@ -574,28 +574,91 @@ class SNorm(nn.Module):
                 output = self.render_net(feats_mem[0], save_im0, feats_mem[1])
                 output = output * _res_w + save_im0 * (1 - _res_w)
             else:
+                _debug_save = os.environ.get('SNORM_DEBUG_SAVE', '0') == '1'
+                _saved = getattr(self, '_debug_saved', 0)
+                _max_save = int(os.environ.get('SNORM_DEBUG_MAX', '10'))
+                _do_debug = _debug_save and _saved < _max_save
+                _all_steps = {}
+                _all_refs = {}
+
                 output = self.render_net(feats_mem[0], save_im0, feats_mem[1])
                 output = output * _res_w + save_im0 * (1 - _res_w)
+                if _do_debug:
+                    _all_steps[1] = output.clone()
+                    _all_refs[1] = feats_mem[0].clone()
 
                 if _steps >= 2:
                     output = self.render_net(feats_mem[1], output, feats_mem[3])
                     output = output * _res_w + save_im0 * (1 - _res_w)
+                    if _do_debug:
+                        _all_steps[2] = output.clone()
+                        _all_refs[2] = feats_mem[1].clone()
 
                 if _steps >= 3:
                     output = self.render_net(feats_mem[2], output, feats_mem[3])
                     output = output * _res_w + save_im0 * (1 - _res_w)
+                    if _do_debug:
+                        _all_steps[3] = output.clone()
+                        _all_refs[3] = feats_mem[2].clone()
 
                 if _steps >= 4:
                     output = self.render_net(feats_mem[3], output, feats_mem[3])
                     output = output * _res_w + save_im0 * (1 - _res_w)
+                    if _do_debug:
+                        _all_steps[4] = output.clone()
+                        _all_refs[4] = feats_mem[3].clone()
 
                 if _steps >= 5:
                     output = self.render_net(feats_mem[4], output, feats_mem[3])
                     output = output * _res_w + save_im0 * (1 - _res_w)
+                    if _do_debug:
+                        _all_steps[5] = output.clone()
+                        _all_refs[5] = feats_mem[4].clone()
 
-                if _steps >= 6 and len(feats_mem) >= 6:
-                    output = self.render_net(feats_mem[5], output, feats_mem[3])
+                if _steps >= 6:
+                    _step6_src = os.environ.get('SNORM_STEP6_SRC', '5')
+                    _s6_idx = int(_step6_src)
+                    _s6_ref = feats_mem[min(_s6_idx, len(feats_mem) - 1)]
+                    if _do_debug:
+                        _all_refs[6] = _s6_ref.clone()
+                    output = self.render_net(_s6_ref, output, feats_mem[3])
                     output = output * _res_w + save_im0 * (1 - _res_w)
+                    if _do_debug:
+                        _all_steps[6] = output.clone()
+
+                if _do_debug:
+                    import pickle
+                    _db_dir = os.environ.get('SNORM_DEBUG_DIR', './debug_step6')
+                    os.makedirs(_db_dir, exist_ok=True)
+                    def _stats(t):
+                        tc = t.detach().cpu()
+                        return {
+                            'mean': float(tc.mean().item()),
+                            'std': float(tc.std().item()),
+                            'min': float(tc.min().item()),
+                            'max': float(tc.max().item()),
+                            'shape': list(tc.shape),
+                        }
+                    _db = {
+                        'save_im0_stats': _stats(save_im0),
+                        'kernel_sz_set': kernel_sz_set,
+                        'step6_src_idx': int(os.environ.get('SNORM_STEP6_SRC', '5')),
+                        'step_imgs': {},
+                        'ref_imgs': {},
+                    }
+                    for _k, _v in _all_steps.items():
+                        _db['step_imgs'][_k] = _v.detach().cpu()
+                        _db[f'step{_k}_stats'] = _stats(_v)
+                    for _k, _v in _all_refs.items():
+                        _db['ref_imgs'][_k] = _v.detach().cpu()
+                        _db[f'ref{_k}_stats'] = _stats(_v)
+                    _all_mem_stats = {}
+                    for _ki in range(len(feats_mem)):
+                        _all_mem_stats[f'mem_{_ki}'] = _stats(feats_mem[_ki])
+                    _db['mem_stats'] = _all_mem_stats
+                    with open(os.path.join(_db_dir, f'step6_data_{_saved:04d}.pkl'), 'wb') as _f:
+                        pickle.dump(_db, _f)
+                    self._debug_saved = _saved + 1
 
             output = self.norm_forward(output)
             output_dict = {'feature_dict': feats_mem, 'weight_dict': [None]}

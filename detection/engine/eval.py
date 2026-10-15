@@ -268,6 +268,11 @@ def do_evaluation(model, data_loader, device, types, output_dir, iteration=None,
     error_counts = {'saved': 0}
     MAX_ERROR_IMAGES = 5
     
+    _debug_det = os.environ.get('SNORM_DEBUG_DET', '0') == '1'
+    _debug_det_dir = os.environ.get('SNORM_DEBUG_DET_DIR', './debug_dets')
+    _debug_dets = {}
+    _debug_gts = {}
+    
     for images, img_metas, targets, _, _, _, _, _ in metric_logger.log_every(data_loader, 10, header):
         assert len(targets) == 1
         images = images.to(device)
@@ -297,6 +302,10 @@ def do_evaluation(model, data_loader, device, types, output_dir, iteration=None,
             pred_scores_np = scores.cpu().numpy()
             gt_boxes_np = gt_boxes_raw.cpu().numpy() if isinstance(gt_boxes_raw, torch.Tensor) else np.array(gt_boxes_raw)
             gt_labels_np = gt_labels_raw.cpu().numpy() if isinstance(gt_labels_raw, torch.Tensor) else np.array(gt_labels_raw)
+
+            if _debug_det:
+                _debug_dets[file_name] = {'boxes': pred_boxes_np, 'scores': pred_scores_np, 'labels': pred_labels_np}
+                _debug_gts[file_name] = {'boxes': gt_boxes_np, 'labels': gt_labels_np}
 
             matches, unmatched_gt, unmatched_pred, _, _ = _match_predictions_to_gt(
                 pred_boxes_np, pred_labels_np, pred_scores_np,
@@ -398,4 +407,12 @@ def do_evaluation(model, data_loader, device, types, output_dir, iteration=None,
     if 'voc' in types:
         result = voc_evaluation(dataset, predictions, output_dir, iteration=iteration, use_07_metric=False)
         results.update(result)
+    
+    if _debug_det and is_main_process():
+        import pickle as _pickle
+        os.makedirs(_debug_det_dir, exist_ok=True)
+        _pickle.dump(_debug_dets, open(os.path.join(_debug_det_dir, 'detections.pkl'), 'wb'))
+        _pickle.dump(_debug_gts, open(os.path.join(_debug_det_dir, 'ground_truths.pkl'), 'wb'))
+        print(f'Saved {len(_debug_dets)} dets + {len(_debug_gts)} gts to {_debug_det_dir}')
+    
     return results
