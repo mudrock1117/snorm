@@ -40,7 +40,8 @@ test_*.py
 *.swo
 *~
 # 步骤6消融分析
-debug_step6_analysis/
+debug_step6_analysis/step6_src*/feats/*.pkl
+debug_step6_analysis/step6_src*/dets/*.pkl
 .marscode/
 
 # 临时文件
