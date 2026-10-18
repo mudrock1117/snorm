@@ -56,7 +56,7 @@ INPUT:
       to_01: True
     - name: 'collect'
 SOLVER:
-  EPOCHS: 120
+  EPOCHS: 5
   STEPS: (80000, 32000, 42000)
   LR: 1e-4
   BATCH_SIZE: 1
@@ -64,4 +64,4 @@ SOLVER:
 TEST:
   EVAL_TYPES: ['voc']
 
-WORK_DIR: './debug/city_2_foggy/s0_dbias_color_fusion_w_elNet'
+WORK_DIR: './debug_spatial_ablation/b1_train_5ep'

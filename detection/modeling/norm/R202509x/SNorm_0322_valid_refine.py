@@ -41,7 +41,14 @@ class SNorm(nn.Module):
         self.memory_aplpha_u = np.zeros((self.memory_len, 3))
         self.memory_index = 0
         self.memory_loc = 0
-        self.ema_rate = 0.9
+        self.ema_rate = 0.85
+
+        self._sigma_mode = os.environ.get('SNORM_SIGMA_MODE', 'fixed')
+        if self._sigma_mode == 'spatial':
+            self.sigma_weight_pred = nn.Conv2d(3, 1, 1, bias=True)
+            nn.init.constant_(self.sigma_weight_pred.bias, float(np.log(0.85 / 0.15)))
+        else:
+            self.sigma_weight_pred = None
 
         self.proj_prev = nn.Sequential(
             nn.Conv2d(3, 3, kernel_size=3, stride=1, padding=1, bias=True),
@@ -84,6 +91,23 @@ class SNorm(nn.Module):
         self.iter_test_save = 0
         self.traing_iter_save = 0
         self.traing_iter_scale_save = 0
+
+    def _clip_internal_params(self):
+        self.alpha_ba.data.clamp_(0.1, 10.0)
+        self.alpha_bu.data.clamp_(-2.0, 2.0)
+        if getattr(self, 'sigma_weight_pred', None) is not None:
+            self.sigma_weight_pred.weight.data.clamp_(-10.0, 10.0)
+            self.sigma_weight_pred.bias.data.clamp_(-10.0, 10.0)
+
+    def check_nan(self):
+        for n, p in self.named_parameters():
+            if torch.isnan(p.data).any() or torch.isinf(p.data).any():
+                return True
+        return False
+
+    def reset_ema(self):
+        self.alpha_ba.data.fill_(1.0)
+        self.alpha_bu.data.zero_()
 
     def forward(self, feats, use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=None, targets=None):
         ################## segnet ####################
@@ -308,18 +332,19 @@ class SNorm(nn.Module):
                 return output, output_dict
 
             elif moe_mode == 7:
+                _ema_eval = float(os.environ.get('SNORM_EMA', '0.85'))
+                feats_n = self.user_norm_v2(feats, mode=0, kernel_sz_set=[1, 1], w_a=1.0, w_u=1.0, ema=_ema_eval)
+                feats_raw = self.norm_back(feats_n)
                 # 空间分区域退化策略：雾天退化 + 夜晚退化 + 保留干净区域
                 # 单步渲染，不使用多步迭代
                 if moe_mark == 0:
                     # 空间分区域退化：雾天偏向
-                    feats_raw = self.norm_back(feats)
                     feats_deg0, feats_deg1, feats_guide = spatial_fog_night_degrade(feats_raw)
                     attn_masks = torch.ones_like(feats_raw)
                     output, out_dicts = self.render_net(feats_deg0, feats_deg1, feats_guide)
 
                 elif moe_mark == 1:
                     # 空间分区域退化：随机交换两版本位置
-                    feats_raw = self.norm_back(feats)
                     feats_deg0, feats_deg1, feats_guide = spatial_fog_night_degrade(feats_raw)
                     attn_masks = torch.ones_like(feats_raw)
                     loc_mark = random.randint(0, 1)
@@ -330,7 +355,6 @@ class SNorm(nn.Module):
 
                 elif moe_mark == 2:
                     # 更强退化：增加退化强度
-                    feats_raw = self.norm_back(feats)
                     feats_deg0, feats_deg1, feats_guide = spatial_fog_night_degrade(feats_raw)
                     # 二次退化增强
                     feats_deg0, _, _ = spatial_fog_night_degrade(feats_deg0)
@@ -340,7 +364,6 @@ class SNorm(nn.Module):
 
                 else:
                     # 轻微退化：仅施加单种退化
-                    feats_raw = self.norm_back(feats)
                     feats_deg0, feats_deg1, feats_guide = spatial_fog_night_degrade(feats_raw)
                     # 用原始特征作为guide，减少退化干扰
                     output, out_dicts = self.render_net(feats_deg0, feats_deg1, feats_raw)
@@ -755,19 +778,38 @@ class SNorm(nn.Module):
 
         feats_pool = F.interpolate(feats_pool, size=(feats.size(-2), feats.size(-1)),
                                    mode='bicubic', align_corners=False)
-        pfeats = feats - feats_pool
 
-        sfeats = pfeats ** 2
-        sfeats = (pool_func(sfeats) + eps).sqrt()
+        sfeats_local_sq = (feats - feats_pool) ** 2
+        sfeats_local = (pool_func(sfeats_local_sq) + eps).sqrt()
+        sfeats_local = F.interpolate(sfeats_local, size=(feats.size(-2), feats.size(-1)),
+                                      mode='bicubic', align_corners=False)
 
-        sfeats = F.interpolate(sfeats, size=(feats.size(-2), feats.size(-1)),
-                               mode='bicubic', align_corners=False)
+        feats_mean_global, feats_std_global = calc_mean_std(feats)
+
+        _stat_mode = os.environ.get('SNORM_STAT_MODE', 'baseline')
+        _stat_lambda = float(os.environ.get('SNORM_STAT_LAMBDA', '0.5'))
+        _sigma_mode = os.environ.get('SNORM_SIGMA_MODE', 'fixed')
+
+        feats_mean = feats_pool
+
+        if _sigma_mode == 'spatial' and self.sigma_weight_pred is not None:
+            alpha = torch.sigmoid(self.sigma_weight_pred(feats))
+            sfeats = alpha * sfeats_local + (1 - alpha) * feats_std_global
+        elif _stat_mode == 'local_only':
+            sfeats = sfeats_local
+        elif _stat_mode == 'global_only':
+            sfeats = feats_std_global
+        elif _stat_mode == 'hybrid':
+            lam = _stat_lambda
+            sfeats = lam * sfeats_local + (1 - lam) * feats_std_global
+        else:
+            ba_ema_rate = ema
+            sfeats = sfeats_local * ba_ema_rate + (1 - ba_ema_rate) * feats_std_global
+
+        pfeats = feats - feats_mean
         alpha_ba = self.alpha_ba.clone().detach()
         alpha_bu = self.alpha_bu.clone().detach()
 
-        feats_mean, feats_std = calc_mean_std(feats)
-        ba_ema_rate = ema
-        sfeats = sfeats * ba_ema_rate + (1 - ba_ema_rate) * feats_std
         alpha_bu = alpha_bu[None, :, None, None]
 
         nfeats = w_a * pfeats * alpha_ba[None, :, None, None] / (sfeats + 1e-3) + w_u * alpha_bu

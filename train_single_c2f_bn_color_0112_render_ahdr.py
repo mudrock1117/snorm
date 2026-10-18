@@ -304,10 +304,15 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
         if type(m).__name__ == 'SNorm':
             snorm_modules.append((name, m))
     for name, m in snorm_modules:
-        m._clip_internal_params()
-        if m.check_nan():
-            print(f"[Epoch {epoch}] WARNING: SNorm '{name}' detected NaN/Inf in alpha params, resetting EMA...")
-            m.reset_ema()
+        if hasattr(m, '_clip_internal_params'):
+            try: m._clip_internal_params()
+            except Exception as e: pass
+        if hasattr(m, 'check_nan') and hasattr(m, 'reset_ema'):
+            try:
+                if m.check_nan():
+                    print(f"[Epoch {epoch}] WARNING: SNorm '{name}' NaN/Inf detected, resetting...")
+                    m.reset_ema()
+            except Exception as e: pass
         print(f"[Epoch {epoch}] SNorm '{name}': alpha_ba={m.alpha_ba.data.cpu().numpy()}, alpha_bu={m.alpha_bu.data.cpu().numpy()}")
 
     _pjotype = det_cfg.MODEL.MODE.PJOTYPE
@@ -370,8 +375,22 @@ def main(det_cfg, args):
           if det_cfg.MODEL.MODE.PJOTYPE == 'BN':
               model_paramters += [{'params': model_without_ddp.teacher.parameters(),'lr':det_cfg.SOLVER.LR}]
           else:
-              model_paramters += [{'params': model_without_ddp.teacher.proj_norm.render_net.parameters(),'lr':det_cfg.SOLVER.LR}]
-              model_paramters += [{'params': model_without_ddp.dis.parameters(),'lr':det_cfg.SOLVER.LR}]
+              _sigma_pred = getattr(model_without_ddp.teacher.proj_norm, 'sigma_weight_pred', None)
+              _render_net = model_without_ddp.teacher.proj_norm.render_net
+              if _sigma_pred is not None:
+                  print('  [B1] Freezing teacher (backbone+rpn+box_head) + dis; training render_net + sigma_weight_pred')
+                  for p in model_without_ddp.teacher.parameters(): p.requires_grad_(False)
+                  for p in model_without_ddp.dis.parameters(): p.requires_grad_(False)
+                  for p in _render_net.parameters(): p.requires_grad_(True)
+                  for p in _sigma_pred.parameters(): p.requires_grad_(True)
+                  _rn_params = sum(p.numel() for p in _render_net.parameters())
+                  _sg_params = sum(p.numel() for p in _sigma_pred.parameters())
+                  print('  [B1] render_net params:', _rn_params, 'sigma_weight_pred params:', _sg_params)
+                  model_paramters += [{'params': _render_net.parameters(),'lr':det_cfg.SOLVER.LR}]
+                  model_paramters += [{'params': _sigma_pred.parameters(),'lr':det_cfg.SOLVER.LR}]
+              else:
+                  model_paramters += [{'params': model_without_ddp.teacher.proj_norm.render_net.parameters(),'lr':det_cfg.SOLVER.LR}]
+                  model_paramters += [{'params': model_without_ddp.dis.parameters(),'lr':det_cfg.SOLVER.LR}]
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
           _total_epochs = det_cfg.SOLVER.EPOCHS
           _t_max = max(1, _total_epochs * len(train_loader))
