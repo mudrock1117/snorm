@@ -199,7 +199,7 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
                 torch.cuda.empty_cache()
             else:
                 _exp_loop = os.environ.get('SNORM_EXPERIMENT', 'E0')
-                if _exp_loop in ('E1', 'E2'):
+                if _exp_loop.upper() in ('E1', 'E2', 'E3'):
                     loss_dict_det, _ = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, \
                                                 is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
                     det_loss_det = sum(list(loss_dict_det.values()))
@@ -363,7 +363,12 @@ def main(det_cfg, args):
         model_without_ddp = model_det.module
     
     current_epoch = -1
+    _experiment_for_init = os.environ.get("SNORM_EXPERIMENT", "E0").upper()
     _default_pretrain = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'best.pth')
+    if _experiment_for_init == "E3":
+        _e2_default = os.path.join(det_cfg.WORK_DIR, "E2", "best.pth")
+        _default_pretrain = os.environ.get("SNORM_INIT_CHECKPOINT", _e2_default)
+        print(f"[E3] initialize from E2 checkpoint: {_default_pretrain}")
     _load_path = args.resume if args.resume else (_default_pretrain if os.path.exists(_default_pretrain) else '')
     if _load_path:
         print('Loading checkpoint from {} ...'.format(_load_path))
@@ -417,8 +422,11 @@ def main(det_cfg, args):
                   print('  [E1] rpn_norm params:', _rp, 'box_head_norm params:', _bp, 'total:', _rp + _bp)
                   model_paramters += [{'params': _teacher.rpn_norm.parameters(), 'lr': _base_lr}]
                   model_paramters += [{'params': _teacher.box_head_norm.parameters(), 'lr': _base_lr}]
-              elif _exp == 'E2':
-                  print('  [E2] SNORM_EXPERIMENT=E2: 冻结 backbone_0/1/2+proj_norm；训练 backbone_3(lr×0.1) + rpn_norm + box_head_norm')
+              elif _exp in ('E2', 'E3'):
+                  if _exp == 'E3':
+                      print('  [E3] two-step iterative AHDR; freeze SNorm/render_net, train backbone_3 (lr×0.1) + detector heads')
+                  else:
+                      print('  [E2] SNORM_EXPERIMENT=E2: 冻结 backbone_0/1/2+proj_norm；训练 backbone_3(lr×0.1) + rpn_norm + box_head_norm')
                   for p in _teacher.backbone_0.parameters(): p.requires_grad_(False)
                   for p in _teacher.backbone_1.parameters(): p.requires_grad_(False)
                   for p in _teacher.backbone_2.parameters(): p.requires_grad_(False)
