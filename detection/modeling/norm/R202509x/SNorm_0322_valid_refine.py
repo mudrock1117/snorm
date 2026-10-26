@@ -581,7 +581,7 @@ class SNorm(nn.Module):
 
             save_im0 = self.norm_back(save_im0)
 
-            _res_w = float(os.environ.get('SNORM_RES_W', '0.9'))
+            _res_w = float(os.environ.get('SNORM_RES_W', '0.6'))
             _steps = int(os.environ.get('SNORM_STEPS', '6'))
 
             if _ablation == 'passthrough':

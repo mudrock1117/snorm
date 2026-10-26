@@ -9,7 +9,8 @@ import signal
 import numpy as np
 
 # CUDA预初始化：在任何其他导入之前初始化CUDA，防止tensorflow导入失败污染CUDA上下文
-os.environ.setdefault('CUDA_VISIBLE_DEVICES', '0')
+if not os.environ.get('CUDA_VISIBLE_DEVICES'):
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 # 降低显存碎片化风险：限制单次分配上限，避免大块分裂
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'max_split_size_mb:128')
 import torch
@@ -197,41 +198,51 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
                 del det_loss_s0, loss_dict_s0, outputs_s
                 torch.cuda.empty_cache()
             else:
-                '''
-                loss_dict_s0, outputs_s = model_det(tr_images, img_metas, s_targets, mode_training=7, step_iter=global_step, \
-                                                    is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
-                det_loss_s0 = sum(list(loss_dict_s0.values()))
-                det_loss_s0.backward()
-                metric_logger.update(det_loss_s=det_loss_s0)
-                del det_loss_s0, loss_dict_s0, outputs_s
-                torch.cuda.empty_cache()
-                '''
+                _exp_loop = os.environ.get('SNORM_EXPERIMENT', 'E0')
+                if _exp_loop in ('E1', 'E2'):
+                    loss_dict_det, _ = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, \
+                                                is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
+                    det_loss_det = sum(list(loss_dict_det.values()))
+                    det_loss_det.backward()
+                    metric_logger.update(det_loss_s=det_loss_det)
+                    del det_loss_det, loss_dict_det
+                    torch.cuda.empty_cache()
+                else:
+                    '''
+                    loss_dict_s0, outputs_s = model_det(tr_images, img_metas, s_targets, mode_training=7, step_iter=global_step, \
+                                                        is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
+                    det_loss_s0 = sum(list(loss_dict_s0.values()))
+                    det_loss_s0.backward()
+                    metric_logger.update(det_loss_s=det_loss_s0)
+                    del det_loss_s0, loss_dict_s0, outputs_s
+                    torch.cuda.empty_cache()
+                    '''
 
-                ###image render###
+                    ###image render###
 
-                loss_dict_s3, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, \
-                                            moe_mark=0, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
+                    loss_dict_s3, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, \
+                                                moe_mark=0, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
 
-                det_loss_s3 = 100 * sum(list(loss_dict_s3.values()))
-                det_loss_s3.backward()
+                    det_loss_s3 = 100 * sum(list(loss_dict_s3.values()))
+                    det_loss_s3.backward()
 
-                ##################
-                torch.nn.utils.clip_grad_norm_(model_det.parameters(), max_norm=1.0)
+                    ##################
+                    torch.nn.utils.clip_grad_norm_(model_det.parameters(), max_norm=1.0)
 
-                loss_dict_s5, _ = model_det(images, img_metas, s_targets, mode_training=11, outputs_teacher=None, \
-                                            moe_mark=2, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
+                    loss_dict_s5, _ = model_det(images, img_metas, s_targets, mode_training=11, outputs_teacher=None, \
+                                                moe_mark=2, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
 
-                det_loss_s5 = 100 * sum(list(loss_dict_s5.values()))
-                det_loss_s5.backward()
+                    det_loss_s5 = 100 * sum(list(loss_dict_s5.values()))
+                    det_loss_s5.backward()
 
-                metric_logger.update(det_loss_s=det_loss_s3)
-                metric_logger.update(det_loss_s3=det_loss_s3)
-                loss_attn_val = loss_dict_s3.get('loss_attn', torch.tensor(0.0))
-                metric_logger.update(det_loss_attn=loss_attn_val)
-                
-                import gc
-                gc.collect()
-                torch.cuda.empty_cache()
+                    metric_logger.update(det_loss_s=det_loss_s3)
+                    metric_logger.update(det_loss_s3=det_loss_s3)
+                    loss_attn_val = loss_dict_s3.get('loss_attn', torch.tensor(0.0))
+                    metric_logger.update(det_loss_attn=loss_attn_val)
+                    
+                    import gc
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
             for optimizer in optimizers:
                 optimizer.step()
@@ -352,17 +363,25 @@ def main(det_cfg, args):
         model_without_ddp = model_det.module
     
     current_epoch = -1
-    if args.resume:
-        print('Loading from {} ...'.format(args.resume))
-        checkpoint = torch.load(args.resume, map_location='cpu')
-        # 加载完整权重，只忽略不匹配的参数
-        # 这样可以确保所有兼容的参数都被加载，而不是过滤掉部分参数
-        model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
+    _default_pretrain = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'best.pth')
+    _load_path = args.resume if args.resume else (_default_pretrain if os.path.exists(_default_pretrain) else '')
+    if _load_path:
+        print('Loading checkpoint from {} ...'.format(_load_path))
+        checkpoint = torch.load(_load_path, map_location='cpu')
+        _state = checkpoint['model'] if 'model' in checkpoint else checkpoint
+        model_without_ddp.load_state_dict(_state, strict=False)
         print('✅ 成功加载权重参数')
         if 'current_epoch' in checkpoint and args.use_current_epoch:
             current_epoch = int(checkpoint['current_epoch'])
+    else:
+        print('⚠️ 未找到预训练权重，使用随机初始化！')
     
     work_dir = det_cfg.WORK_DIR
+    _exp_wd = os.environ.get('SNORM_EXPERIMENT', 'E0')
+    if _exp_wd != 'E0':
+        work_dir = os.path.join(work_dir, _exp_wd)
+        os.makedirs(work_dir, exist_ok=True)
+        print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
     if args.test_only:
         evaluation(model_det, test_loaders, device, types=det_cfg.TEST.EVAL_TYPES, output_dir=work_dir)
         return
@@ -375,22 +394,66 @@ def main(det_cfg, args):
           if det_cfg.MODEL.MODE.PJOTYPE == 'BN':
               model_paramters += [{'params': model_without_ddp.teacher.parameters(),'lr':det_cfg.SOLVER.LR}]
           else:
-              _sigma_pred = getattr(model_without_ddp.teacher.proj_norm, 'sigma_weight_pred', None)
-              _render_net = model_without_ddp.teacher.proj_norm.render_net
-              if _sigma_pred is not None:
-                  print('  [B1] Freezing teacher (backbone+rpn+box_head) + dis; training render_net + sigma_weight_pred')
-                  for p in model_without_ddp.teacher.parameters(): p.requires_grad_(False)
-                  for p in model_without_ddp.dis.parameters(): p.requires_grad_(False)
-                  for p in _render_net.parameters(): p.requires_grad_(True)
-                  for p in _sigma_pred.parameters(): p.requires_grad_(True)
-                  _rn_params = sum(p.numel() for p in _render_net.parameters())
-                  _sg_params = sum(p.numel() for p in _sigma_pred.parameters())
-                  print('  [B1] render_net params:', _rn_params, 'sigma_weight_pred params:', _sg_params)
-                  model_paramters += [{'params': _render_net.parameters(),'lr':det_cfg.SOLVER.LR}]
-                  model_paramters += [{'params': _sigma_pred.parameters(),'lr':det_cfg.SOLVER.LR}]
+              _exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
+              _base_lr = det_cfg.SOLVER.LR
+              _teacher = model_without_ddp.teacher
+              _dis = model_without_ddp.dis
+              _proj = _teacher.proj_norm
+              _rn = _proj.render_net
+              _sp = getattr(_proj, 'sigma_weight_pred', None)
+              def _count(_params): return sum(p.numel() for p in _params)
+              if _exp == 'E1':
+                  print('  [E1] SNORM_EXPERIMENT=E1: 冻结 backbone+proj_norm；训练 rpn_norm + box_head_norm')
+                  for p in _teacher.backbone_0.parameters(): p.requires_grad_(False)
+                  for p in _teacher.backbone_1.parameters(): p.requires_grad_(False)
+                  for p in _teacher.backbone_2.parameters(): p.requires_grad_(False)
+                  for p in _teacher.backbone_3.parameters(): p.requires_grad_(False)
+                  for p in _teacher.proj_norm.parameters(): p.requires_grad_(False)
+                  for p in _teacher.rpn_norm.parameters(): p.requires_grad_(True)
+                  for p in _teacher.box_head_norm.parameters(): p.requires_grad_(True)
+                  for p in _dis.parameters(): p.requires_grad_(False)
+                  _rp = _count(_teacher.rpn_norm.parameters())
+                  _bp = _count(_teacher.box_head_norm.parameters())
+                  print('  [E1] rpn_norm params:', _rp, 'box_head_norm params:', _bp, 'total:', _rp + _bp)
+                  model_paramters += [{'params': _teacher.rpn_norm.parameters(), 'lr': _base_lr}]
+                  model_paramters += [{'params': _teacher.box_head_norm.parameters(), 'lr': _base_lr}]
+              elif _exp == 'E2':
+                  print('  [E2] SNORM_EXPERIMENT=E2: 冻结 backbone_0/1/2+proj_norm；训练 backbone_3(lr×0.1) + rpn_norm + box_head_norm')
+                  for p in _teacher.backbone_0.parameters(): p.requires_grad_(False)
+                  for p in _teacher.backbone_1.parameters(): p.requires_grad_(False)
+                  for p in _teacher.backbone_2.parameters(): p.requires_grad_(False)
+                  for p in _teacher.proj_norm.parameters(): p.requires_grad_(False)
+                  for p in _teacher.backbone_3.parameters(): p.requires_grad_(True)
+                  for p in _teacher.rpn_norm.parameters(): p.requires_grad_(True)
+                  for p in _teacher.box_head_norm.parameters(): p.requires_grad_(True)
+                  for p in _dis.parameters(): p.requires_grad_(False)
+                  _b3p = _count(_teacher.backbone_3.parameters())
+                  _rp = _count(_teacher.rpn_norm.parameters())
+                  _bp = _count(_teacher.box_head_norm.parameters())
+                  print('  [E2] backbone_3 params:', _b3p, '(lr×0.1), rpn_norm:', _rp, 'box_head_norm:', _bp, 'total:', _b3p + _rp + _bp)
+                  model_paramters += [{'params': _teacher.backbone_3.parameters(), 'lr': _base_lr * 0.1}]
+                  model_paramters += [{'params': _teacher.rpn_norm.parameters(), 'lr': _base_lr}]
+                  model_paramters += [{'params': _teacher.box_head_norm.parameters(), 'lr': _base_lr}]
               else:
-                  model_paramters += [{'params': model_without_ddp.teacher.proj_norm.render_net.parameters(),'lr':det_cfg.SOLVER.LR}]
-                  model_paramters += [{'params': model_without_ddp.dis.parameters(),'lr':det_cfg.SOLVER.LR}]
+                  _exp = 'E0'
+                  if _sp is not None:
+                      print('  [E0] baseline: 冻结 teacher+dis；训练 render_net + sigma_weight_pred')
+                      for p in _teacher.parameters(): p.requires_grad_(False)
+                      for p in _dis.parameters(): p.requires_grad_(False)
+                      for p in _rn.parameters(): p.requires_grad_(True)
+                      for p in _sp.parameters(): p.requires_grad_(True)
+                      _rn_params = _count(_rn.parameters())
+                      _sg_params = _count(_sp.parameters())
+                      print('  [E0] render_net params:', _rn_params, 'sigma_weight_pred params:', _sg_params)
+                      model_paramters += [{'params': _rn.parameters(), 'lr': _base_lr}]
+                      model_paramters += [{'params': _sp.parameters(), 'lr': _base_lr}]
+                  else:
+                      for p in _teacher.parameters(): p.requires_grad_(False)
+                      for p in _dis.parameters(): p.requires_grad_(False)
+                      for p in _rn.parameters(): p.requires_grad_(True)
+                      model_paramters += [{'params': _rn.parameters(), 'lr': _base_lr}]
+                      model_paramters += [{'params': _dis.parameters(), 'lr': _base_lr}]
+              print('  [SNORM_EXPERIMENT] active =', _exp)
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
           _total_epochs = det_cfg.SOLVER.EPOCHS
           _t_max = max(1, _total_epochs * len(train_loader))
