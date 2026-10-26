@@ -112,6 +112,44 @@ class SNorm(nn.Module):
     def forward(self, feats, use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=None, targets=None):
         ################## segnet ####################
         if self.training:
+            # E3: two sequential AHDR render passes; used only for detector fine-tuning.
+            # The render network is frozen in E3, but its forward pass remains differentiable.
+            if moe_mode == 8:
+                _ema = float(os.environ.get("SNORM_EMA", "0.85"))
+                _res_w = float(os.environ.get("SNORM_RES_W", "0.6"))
+                _anchor_n = self.user_norm_v2(
+                    feats, mode=0, kernel_sz_set=[1, 1],
+                    w_a=1.0, w_u=1.0, ema=1.0
+                )
+                anchor = self.norm_back(_anchor_n)
+
+                candidate_3 = self.norm_back(self.user_norm_v2(
+                    feats, mode=0, kernel_sz_set=[3, 3],
+                    w_a=1.0, w_u=1.0, ema=_ema, eps=1e-5
+                ))
+                candidate_7 = self.norm_back(self.user_norm_v2(
+                    feats, mode=0, kernel_sz_set=[7, 7],
+                    w_a=1.0, w_u=1.0, ema=_ema, eps=1e-5
+                ))
+                candidate_11 = self.norm_back(self.user_norm_v2(
+                    feats, mode=0, kernel_sz_set=[11, 11],
+                    w_a=1.0, w_u=1.0, ema=_ema, eps=1e-5
+                ))
+
+                # AHDR's three-input training API returns (rendered, auxiliary_dict).
+                rendered_1, _aux_1 = self.render_net(candidate_3, anchor, candidate_7)
+                step1 = _res_w * rendered_1 + (1.0 - _res_w) * anchor
+                rendered_2, _aux_2 = self.render_net(candidate_7, step1, candidate_11)
+                output = _res_w * rendered_2 + (1.0 - _res_w) * anchor
+
+                score_input = self.norm_forward(output.detach())
+                score = self.weight_gen_unet2(score_input)
+                output_dict = {
+                    "feature_dict": [output],
+                    "weight_dict": [score],
+                }
+                return output, output_dict
+
             # global
             if moe_mode == 0:
                 feats_0 = self.user_norm_v2(feats, mode=0, kernel_sz_set=[1, 1], w_a=1.0, w_u=1.0, ema=1.0)
