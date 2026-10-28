@@ -396,6 +396,10 @@ class ModuleSet(nn.Module):
         elif mode== 5: #detection training
             features_prev = self.prev_norm(images)
 
+            # E3 detection path explicitly invokes the iterative AHDR renderer.
+            if os.environ.get("SNORM_EXPERIMENT", "E0").upper() == "E3":
+                moe_mode = 8
+
             dets = None
             features_wo = None
             rpn_losses_wo = None
