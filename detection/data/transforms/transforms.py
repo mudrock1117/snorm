@@ -339,3 +339,62 @@ class compose(object):
         for transform in self.transforms:
             results = transform(results)
         return results
+
+
+class local_adaptive_enhance(object):
+    """Lightweight local luminance enhancement for domain-generalization experiments.
+
+    Operates on the raw uint8 image in the data pipeline (before normalize).
+    It applies conservative CLAHE to luminance and/or a smooth local brightness
+    correction. Bounding the gain helps avoid amplifying noise in dark regions.
+    """
+    def __init__(self, mode="both", prob=0.5, clip_limit=1.5, tile_grid_size=8,
+                 brightness_strength=0.25, target_luma=105.0,
+                 min_gain=0.80, max_gain=1.25, blur_ratio=0.08):
+        if mode not in ("contrast", "brightness", "both"):
+            raise ValueError("mode must be contrast, brightness, or both")
+        self.mode = mode
+        self.prob = float(prob)
+        self.clip_limit = float(clip_limit)
+        self.tile_grid_size = int(tile_grid_size)
+        self.brightness_strength = float(brightness_strength)
+        self.target_luma = float(target_luma)
+        self.min_gain = float(min_gain)
+        self.max_gain = float(max_gain)
+        self.blur_ratio = float(blur_ratio)
+
+    def __call__(self, results):
+        if np.random.rand() >= self.prob:
+            return results
+        image = results.get("img")
+        if image is None or image.ndim != 3 or image.shape[2] != 3:
+            return results
+        original_dtype = image.dtype
+        if original_dtype != np.uint8:
+            image = np.clip(image, 0, 255).astype(np.uint8)
+        # Dataset images in this pipeline are loaded by OpenCV (BGR).
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+
+        if self.mode in ("contrast", "both"):
+            clahe = cv2.createCLAHE(
+                clipLimit=self.clip_limit,
+                tileGridSize=(self.tile_grid_size, self.tile_grid_size))
+            l_channel = clahe.apply(l_channel)
+
+        if self.mode in ("brightness", "both"):
+            h, w = l_channel.shape
+            sigma = max(3.0, self.blur_ratio * min(h, w))
+            illumination = cv2.GaussianBlur(
+                l_channel.astype(np.float32), (0, 0), sigmaX=sigma, sigmaY=sigma)
+            # Increase locally dim regions and gently suppress already bright regions.
+            gain = 1.0 + self.brightness_strength * (
+                (self.target_luma - illumination) / max(self.target_luma, 1.0))
+            gain = np.clip(gain, self.min_gain, self.max_gain)
+            corrected = l_channel.astype(np.float32) * gain
+            l_channel = np.clip(corrected, 0, 255).astype(np.uint8)
+
+        enhanced = cv2.cvtColor(
+            cv2.merge((l_channel, a_channel, b_channel)), cv2.COLOR_LAB2BGR)
+        results["img"] = enhanced.astype(original_dtype, copy=False)
+        return results
