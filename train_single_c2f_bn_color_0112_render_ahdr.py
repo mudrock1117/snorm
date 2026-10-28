@@ -4,6 +4,7 @@ import math
 import os
 import time
 import copy
+import csv
 import random
 import signal
 import numpy as np
@@ -200,30 +201,162 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
             else:
                 _exp_loop = os.environ.get('SNORM_EXPERIMENT', 'E0').upper()
                 if _exp_loop == 'E3':
-                    # Stage 1: image/render reconstruction objective.
+                    _model_inner_e3 = model_det.module if hasattr(model_det, 'module') else model_det
+                    if not hasattr(_model_inner_e3, '_e3_loss_weights'):
+                        _model_inner_e3._e3_loss_weights = {
+                            'rec': float(os.environ.get('SNORM_REC_WEIGHT', '100.0')),
+                            'align': float(os.environ.get('SNORM_ALIGN_WEIGHT', '100.0')),
+                        }
+                    if not hasattr(_model_inner_e3, '_e3_grad_ema'):
+                        _model_inner_e3._e3_grad_ema = {'rec': None, 'align': None, 'det': None}
+                    _e3_weights = _model_inner_e3._e3_loss_weights
+                    _rec_weight = float(_e3_weights['rec'])
+                    _align_weight = float(_e3_weights['align'])
+                    _diag_interval = max(0, int(os.environ.get('SNORM_GRAD_DIAG_INTERVAL', '100')))
+                    _diag_active = _diag_interval > 0 and global_step % _diag_interval == 0
+                    _grad_state = {'stage': 'rec', 'sums': {}}
+                    _hook_handles = []
+
+                    # Hooks capture each backward's incoming gradient contribution directly.
+                    # This avoids extra autograd.grad passes and parameter-sized gradient copies.
+                    if _diag_active:
+                        _groups = {
+                            'render_net': list(_model_inner_e3.teacher.proj_norm.render_net.parameters()),
+                            'backbone_3': list(_model_inner_e3.teacher.backbone_3.parameters()),
+                            'rpn': list(_model_inner_e3.teacher.rpn_norm.parameters()),
+                            'box_head': list(_model_inner_e3.teacher.box_head_norm.parameters()),
+                        }
+                        for _group_name, _group_params in _groups.items():
+                            for _param in _group_params:
+                                if not _param.requires_grad:
+                                    continue
+                                def _make_e3_grad_hook(group_name):
+                                    def _e3_grad_hook(grad):
+                                        if grad is not None:
+                                            _key = (_grad_state['stage'], group_name)
+                                            _val = grad.detach().float().square().sum()
+                                            if _key in _grad_state['sums']:
+                                                _grad_state['sums'][_key] = _grad_state['sums'][_key] + _val
+                                            else:
+                                                _grad_state['sums'][_key] = _val
+                                        return grad
+                                    return _e3_grad_hook
+                                _hook_handles.append(_param.register_hook(_make_e3_grad_hook(_group_name)))
+
+                    # Stage 1: reconstruction objective.
+                    _grad_state['stage'] = 'rec'
                     loss_dict_s3, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, moe_mark=0, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
-                    det_loss_s3 = 100 * sum(list(loss_dict_s3.values()))
+                    _raw_loss_rec = sum(list(loss_dict_s3.values()))
+                    _loss_rec_value = float(_raw_loss_rec.detach().float().item())
+                    det_loss_s3 = _rec_weight * _raw_loss_rec
                     det_loss_s3.backward()
                     metric_logger.update(det_loss_s3=det_loss_s3.detach())
-                    del det_loss_s3, loss_dict_s3
-                    torch.cuda.empty_cache()
+                    del det_loss_s3, _raw_loss_rec, loss_dict_s3
 
                     # Stage 2: feature-domain alignment objective.
+                    _grad_state['stage'] = 'align'
                     loss_dict_s5, _ = model_det(images, img_metas, s_targets, mode_training=11, outputs_teacher=None, moe_mark=2, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
-                    det_loss_s5 = 100 * sum(list(loss_dict_s5.values()))
+                    _raw_loss_align = sum(list(loss_dict_s5.values()))
+                    _loss_align_value = float(_raw_loss_align.detach().float().item())
+                    det_loss_s5 = _align_weight * _raw_loss_align
                     det_loss_s5.backward()
                     metric_logger.update(det_loss_s5=det_loss_s5.detach())
-                    del det_loss_s5, loss_dict_s5
-                    torch.cuda.empty_cache()
+                    del det_loss_s5, _raw_loss_align, loss_dict_s5
 
-                    # Stage 3: detection objective routed through moe_mode=8.
+                    # Stage 3: detection objective through iterative AHDR (moe_mode=8).
+                    _grad_state['stage'] = 'det'
                     loss_dict_det, _ = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
                     det_loss_det = sum(list(loss_dict_det.values()))
+                    _loss_det_value = float(det_loss_det.detach().float().item())
                     det_loss_det.backward()
                     metric_logger.update(det_loss_s=det_loss_det.detach())
                     del det_loss_det, loss_dict_det
+
+                    if _diag_active:
+                        for _handle in _hook_handles:
+                            _handle.remove()
+
+                        def _e3_grad_norm(stage_name, group_name):
+                            _v = _grad_state['sums'].get((stage_name, group_name))
+                            return 0.0 if _v is None else float(torch.sqrt(_v).item())
+
+                        _g_rec = _e3_grad_norm('rec', 'render_net')
+                        _g_align = _e3_grad_norm('align', 'render_net')
+                        _g_det_render = _e3_grad_norm('det', 'render_net')
+                        _g_det_backbone = _e3_grad_norm('det', 'backbone_3')
+                        _g_det_rpn = _e3_grad_norm('det', 'rpn')
+                        _g_det_box = _e3_grad_norm('det', 'box_head')
+                        _raw_g_rec = _g_rec / max(_rec_weight, 1e-12)
+                        _raw_g_align = _g_align / max(_align_weight, 1e-12)
+                        _raw_g_det = _g_det_render
+
+                        _mode = os.environ.get('SNORM_LOSS_WEIGHT_MODE', 'adaptive').strip().lower()
+                        _beta = min(0.999, max(0.0, float(os.environ.get('SNORM_GRAD_EMA_BETA', '0.9'))))
+                        _ratio_rec = max(0.01, float(os.environ.get('SNORM_REC_GRAD_RATIO', '0.5')))
+                        _ratio_align = max(0.01, float(os.environ.get('SNORM_ALIGN_GRAD_RATIO', '0.5')))
+                        _w_min = max(0.0, float(os.environ.get('SNORM_LOSS_WEIGHT_MIN', '1.0')))
+                        _w_max = max(_w_min, float(os.environ.get('SNORM_LOSS_WEIGHT_MAX', '100.0')))
+                        _weight_smooth = min(1.0, max(0.0, float(os.environ.get('SNORM_WEIGHT_SMOOTH', '0.5'))))
+                        _warmup = max(0, int(os.environ.get('SNORM_ADAPT_WARMUP_STEPS', '100')))
+
+                        for _key, _g in [('rec', _raw_g_rec), ('align', _raw_g_align), ('det', _raw_g_det)]:
+                            _old_ema = _model_inner_e3._e3_grad_ema[_key]
+                            _model_inner_e3._e3_grad_ema[_key] = _g if _old_ema is None else _beta * _old_ema + (1.0 - _beta) * _g
+
+                        _next_rec_weight, _next_align_weight = _rec_weight, _align_weight
+                        if _mode == 'adaptive' and global_step >= _warmup:
+                            _ema_rec = _model_inner_e3._e3_grad_ema['rec']
+                            _ema_align = _model_inner_e3._e3_grad_ema['align']
+                            _ema_det = _model_inner_e3._e3_grad_ema['det']
+                            _eps = 1e-12
+                            if _ema_det is not None and _ema_rec is not None and _ema_det > _eps and _ema_rec > _eps:
+                                _target = min(_w_max, max(_w_min, _ratio_rec * _ema_det / (_ema_rec + _eps)))
+                                _next_rec_weight = (1.0 - _weight_smooth) * _rec_weight + _weight_smooth * _target
+                            if _ema_det is not None and _ema_align is not None and _ema_det > _eps and _ema_align > _eps:
+                                _target = min(_w_max, max(_w_min, _ratio_align * _ema_det / (_ema_align + _eps)))
+                                _next_align_weight = (1.0 - _weight_smooth) * _align_weight + _weight_smooth * _target
+                            _e3_weights['rec'] = _next_rec_weight
+                            _e3_weights['align'] = _next_align_weight
+
+                        _suffix = os.environ.get('SNORM_WD_SUFFIX', '').strip()
+                        _run_name = 'E3' + (f'_{_suffix}' if _suffix else '')
+                        _diag_dir = os.path.join(det_cfg.WORK_DIR, _run_name)
+                        os.makedirs(_diag_dir, exist_ok=True)
+                        _diag_path = os.environ.get('SNORM_GRAD_LOG', os.path.join(_diag_dir, 'e3_gradient_diagnostics.csv'))
+                        _write_header = not os.path.exists(_diag_path) or os.path.getsize(_diag_path) == 0
+                        with open(_diag_path, 'a', newline='', encoding='utf-8') as _csv_file:
+                            _writer = csv.writer(_csv_file)
+                            if _write_header:
+                                _writer.writerow([
+                                    'epoch', 'global_step', 'snorm_steps', 'weight_mode',
+                                    'loss_rec_raw', 'loss_align_raw', 'loss_det',
+                                    'weight_rec_used', 'weight_align_used',
+                                    'grad_rec_render_weighted', 'grad_align_render_weighted',
+                                    'grad_det_render', 'grad_rec_render_raw', 'grad_align_render_raw',
+                                    'grad_det_backbone3', 'grad_det_rpn', 'grad_det_box_head',
+                                    'weight_rec_next', 'weight_align_next'
+                                ])
+                            _writer.writerow([
+                                epoch, global_step, os.environ.get('SNORM_STEPS', '6'), _mode,
+                                _loss_rec_value, _loss_align_value, _loss_det_value,
+                                _rec_weight, _align_weight,
+                                _g_rec, _g_align, _g_det_render, _raw_g_rec, _raw_g_align,
+                                _g_det_backbone, _g_det_rpn, _g_det_box,
+                                _next_rec_weight, _next_align_weight
+                            ])
+                        print(
+                            f"[E3-GRAD] epoch={epoch} step={global_step} "
+                            f"loss(rec/align/det)={_loss_rec_value:.5g}/{_loss_align_value:.5g}/{_loss_det_value:.5g} "
+                            f"render_grad(weighted rec/align/det)={_g_rec:.4g}/{_g_align:.4g}/{_g_det_render:.4g} "
+                            f"render_grad(raw rec/align)={_raw_g_rec:.4g}/{_raw_g_align:.4g} "
+                            f"det_grad(backbone3/rpn/box)={_g_det_backbone:.4g}/{_g_det_rpn:.4g}/{_g_det_box:.4g} "
+                            f"weights(used->next)={_rec_weight:.3g}/{_align_weight:.3g}->"
+                            f"{_next_rec_weight:.3g}/{_next_align_weight:.3g}"
+                        )
+
                     torch.nn.utils.clip_grad_norm_(model_det.parameters(), max_norm=1.0)
-                    torch.cuda.empty_cache()
+                    # empty_cache between backward passes adds allocator overhead and does not
+                    # release tensors that are still alive.
                 elif _exp_loop in ('E1', 'E2'):
                     loss_dict_det, _ = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
                     det_loss_det = sum(list(loss_dict_det.values()))
