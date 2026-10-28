@@ -6,6 +6,7 @@ TRANSFORMS = {
     'normalize': normalize,
     'collect': collect,
     'pad': pad,
+    'local_adaptive_enhance': local_adaptive_enhance,
 }
 
 
