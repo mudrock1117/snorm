@@ -126,7 +126,10 @@ class SNorm(nn.Module):
                 def _ahdr_step(f0, f1, f2):
                     def _fn(x0, x1, x2):
                         rendered = self.render_net(x0, x1, x2)
-                        return rendered[0] if isinstance(rendered, tuple) else rendered
+                        rendered = rendered[0] if isinstance(rendered, tuple) else rendered
+                        # AHDR eval clamps three-input outputs to [0, 1]; match that
+                        # range during E3 training so train/eval use the same recurrence.
+                        return torch.clamp(rendered, 0.0, 1.0)
                     if self.training and torch.is_grad_enabled():
                         return checkpoint(_fn, f0, f1, f2, use_reentrant=False)
                     return _fn(f0, f1, f2)
