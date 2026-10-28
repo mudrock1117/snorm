@@ -290,6 +290,18 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
                         _raw_g_align = _g_align / max(_align_weight, 1e-12)
                         _raw_g_det = _g_det_render
 
+                        # In DDP, synchronize these three scalar statistics so every rank
+                        # applies identical loss weights. This runs only on diagnostic steps.
+                        if torch.distributed.is_available() and torch.distributed.is_initialized():
+                            _grad_stats = torch.tensor(
+                                [_raw_g_rec, _raw_g_align, _raw_g_det],
+                                dtype=torch.float64,
+                                device=next(_model_inner_e3.parameters()).device,
+                            )
+                            torch.distributed.all_reduce(_grad_stats, op=torch.distributed.ReduceOp.SUM)
+                            _grad_stats /= float(torch.distributed.get_world_size())
+                            _raw_g_rec, _raw_g_align, _raw_g_det = [float(_v) for _v in _grad_stats.tolist()]
+
                         _mode = os.environ.get('SNORM_LOSS_WEIGHT_MODE', 'adaptive').strip().lower()
                         _beta = min(0.999, max(0.0, float(os.environ.get('SNORM_GRAD_EMA_BETA', '0.9'))))
                         _ratio_rec = max(0.01, float(os.environ.get('SNORM_REC_GRAD_RATIO', '0.5')))
