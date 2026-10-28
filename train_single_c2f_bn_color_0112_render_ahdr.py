@@ -466,6 +466,8 @@ def main(det_cfg, args):
                   for p in _teacher.box_head_norm.parameters(): p.requires_grad_(True)
                   for p in _dis.parameters(): p.requires_grad_(False)
                   model_paramters += [{'params': _rn.parameters(), 'lr': _base_lr}]
+                  if _sp is not None:
+                      model_paramters += [{'params': _sp.parameters(), 'lr': _base_lr}]
                   model_paramters += [{'params': _teacher.backbone_3.parameters(), 'lr': _base_lr * 0.1}]
                   model_paramters += [{'params': _teacher.rpn_norm.parameters(), 'lr': _base_lr}]
                   model_paramters += [{'params': _teacher.box_head_norm.parameters(), 'lr': _base_lr}]
