@@ -244,10 +244,8 @@ class ModuleSet(nn.Module):
             #if update_norm_p:
             #    self.proj_norm.update_norm_parameters(features_prev, is_update=is_update)
                 
-            _snorm_experiment = os.environ.get("SNORM_EXPERIMENT", "E0").upper()
-            _snorm_mode = 8 if _snorm_experiment == "E3" else moe_mode
             features_norm, feat_dict = self.dist_prog(features_prev.detach(), targets, stride=8, domain=domain, \
-            use_dbiase=use_dbiase, moe_mode=_snorm_mode, moe_mark=moe_mark)
+            use_dbiase=use_dbiase, moe_mode=moe_mode, moe_mark=moe_mark)
             # 保存渲染结果用于评估可视化
             self._last_render_features = features_norm.detach()
             #features_norm = features_prev
