@@ -125,7 +125,7 @@ class SNorm(nn.Module):
 
                 def _ahdr_step(f0, f1, f2):
                     def _fn(x0, x1, x2):
-                        rendered = self.render_net(x0, x1, x2, return_attn=False)
+                        rendered = self.render_net(x0, x1, x2)
                         return rendered[0] if isinstance(rendered, tuple) else rendered
                     if self.training and torch.is_grad_enabled():
                         return checkpoint(_fn, f0, f1, f2, use_reentrant=False)
@@ -384,7 +384,7 @@ class SNorm(nn.Module):
                             f0, f1, f2 = candidates[2], output, candidates[3]
                         else:
                             f0, f1, f2 = candidates[min(step_idx, len(candidates)-1)], output, candidates[min(step_idx+1, len(candidates)-1)]
-                        rendered = self.render_net(f0, f1, f2, return_attn=False)
+                        rendered = self.render_net(f0, f1, f2)
                         if isinstance(rendered, tuple):
                             rendered = rendered[0]
                         output = _res_w * rendered + (1.0 - _res_w) * anchor
