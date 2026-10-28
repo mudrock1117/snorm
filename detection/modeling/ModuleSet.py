@@ -394,6 +394,11 @@ class ModuleSet(nn.Module):
         elif mode== 5: #detection training
             features_prev = self.prev_norm(images)
 
+            # E3 detection path explicitly invokes the iterative AHDR renderer.
+            _is_e3 = os.environ.get("SNORM_EXPERIMENT", "E0").upper() == "E3"
+            if _is_e3:
+                moe_mode = 8
+
             dets = None
             features_wo = None
             rpn_losses_wo = None
@@ -403,7 +408,9 @@ class ModuleSet(nn.Module):
             if update_norm_p:
                 self.proj_norm.update_norm_parameters(features_prev, is_update=is_update)
             
-            features_norm, feat_dict = self.dist_prog(features_prev.detach(), targets, stride=8, domain=domain, \
+            # Preserve E2's detached input, but allow E3 detection gradients to reach backbone_3.
+            _e3_input_features = features_prev if _is_e3 else features_prev.detach()
+            features_norm, feat_dict = self.dist_prog(_e3_input_features, targets, stride=8, domain=domain, \
             use_dbiase=use_dbiase, moe_mode=moe_mode)
             #features_norm, feat_dict = features_prev, None
             #features_norm = features_prev
