@@ -198,13 +198,37 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
                 del det_loss_s0, loss_dict_s0, outputs_s
                 torch.cuda.empty_cache()
             else:
-                _exp_loop = os.environ.get('SNORM_EXPERIMENT', 'E0')
-                if _exp_loop.upper() in ('E1', 'E2', 'E3'):
-                    loss_dict_det, _ = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, \
-                                                is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
+                _exp_loop = os.environ.get('SNORM_EXPERIMENT', 'E0').upper()
+                if _exp_loop == 'E3':
+                    # Stage 1: image/render reconstruction objective.
+                    loss_dict_s3, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, moe_mark=0, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
+                    det_loss_s3 = 100 * sum(list(loss_dict_s3.values()))
+                    det_loss_s3.backward()
+                    metric_logger.update(det_loss_s3=det_loss_s3.detach())
+                    del det_loss_s3, loss_dict_s3
+                    torch.cuda.empty_cache()
+
+                    # Stage 2: feature-domain alignment objective.
+                    loss_dict_s5, _ = model_det(images, img_metas, s_targets, mode_training=11, outputs_teacher=None, moe_mark=2, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
+                    det_loss_s5 = 100 * sum(list(loss_dict_s5.values()))
+                    det_loss_s5.backward()
+                    metric_logger.update(det_loss_s5=det_loss_s5.detach())
+                    del det_loss_s5, loss_dict_s5
+                    torch.cuda.empty_cache()
+
+                    # Stage 3: detection objective routed through moe_mode=8.
+                    loss_dict_det, _ = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
                     det_loss_det = sum(list(loss_dict_det.values()))
                     det_loss_det.backward()
-                    metric_logger.update(det_loss_s=det_loss_det)
+                    metric_logger.update(det_loss_s=det_loss_det.detach())
+                    del det_loss_det, loss_dict_det
+                    torch.nn.utils.clip_grad_norm_(model_det.parameters(), max_norm=1.0)
+                    torch.cuda.empty_cache()
+                elif _exp_loop in ('E1', 'E2'):
+                    loss_dict_det, _ = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
+                    det_loss_det = sum(list(loss_dict_det.values()))
+                    det_loss_det.backward()
+                    metric_logger.update(det_loss_s=det_loss_det.detach())
                     del det_loss_det, loss_dict_det
                     torch.cuda.empty_cache()
                 else:
@@ -217,29 +241,20 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
                     del det_loss_s0, loss_dict_s0, outputs_s
                     torch.cuda.empty_cache()
                     '''
-
-                    ###image render###
-
+                    ### image render ###
                     loss_dict_s3, _ = model_det(images, img_metas, s_targets, mode_training=10, outputs_teacher=None, \
                                                 moe_mark=0, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
-
                     det_loss_s3 = 100 * sum(list(loss_dict_s3.values()))
                     det_loss_s3.backward()
-
-                    ##################
                     torch.nn.utils.clip_grad_norm_(model_det.parameters(), max_norm=1.0)
-
                     loss_dict_s5, _ = model_det(images, img_metas, s_targets, mode_training=11, outputs_teacher=None, \
                                                 moe_mark=2, stpd_images=tr_images, stpd_trans=tr_trans, step_iter=global_step)
-
                     det_loss_s5 = 100 * sum(list(loss_dict_s5.values()))
                     det_loss_s5.backward()
-
                     metric_logger.update(det_loss_s=det_loss_s3)
                     metric_logger.update(det_loss_s3=det_loss_s3)
                     loss_attn_val = loss_dict_s3.get('loss_attn', torch.tensor(0.0))
                     metric_logger.update(det_loss_attn=loss_attn_val)
-                    
                     import gc
                     gc.collect()
                     torch.cuda.empty_cache()
@@ -382,11 +397,13 @@ def main(det_cfg, args):
         print('⚠️ 未找到预训练权重，使用随机初始化！')
     
     work_dir = det_cfg.WORK_DIR
-    _exp_wd = os.environ.get('SNORM_EXPERIMENT', 'E0')
+    _exp_wd = os.environ.get('SNORM_EXPERIMENT', 'E0').upper()
     if _exp_wd != 'E0':
-        work_dir = os.path.join(work_dir, _exp_wd)
+        _wd_suffix = os.environ.get('SNORM_WD_SUFFIX', '').strip()
+        _run_dir = _exp_wd + (f'_{_wd_suffix}' if _exp_wd == 'E3' and _wd_suffix else '')
+        work_dir = os.path.join(work_dir, _run_dir)
         os.makedirs(work_dir, exist_ok=True)
-        print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
+        print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, run_dir={_run_dir}, work_dir={work_dir}')
     if args.test_only:
         evaluation(model_det, test_loaders, device, types=det_cfg.TEST.EVAL_TYPES, output_dir=work_dir)
         return
@@ -422,11 +439,8 @@ def main(det_cfg, args):
                   print('  [E1] rpn_norm params:', _rp, 'box_head_norm params:', _bp, 'total:', _rp + _bp)
                   model_paramters += [{'params': _teacher.rpn_norm.parameters(), 'lr': _base_lr}]
                   model_paramters += [{'params': _teacher.box_head_norm.parameters(), 'lr': _base_lr}]
-              elif _exp in ('E2', 'E3'):
-                  if _exp == 'E3':
-                      print('  [E3] two-step iterative AHDR; freeze SNorm/render_net, train backbone_3 (lr×0.1) + detector heads')
-                  else:
-                      print('  [E2] SNORM_EXPERIMENT=E2: 冻结 backbone_0/1/2+proj_norm；训练 backbone_3(lr×0.1) + rpn_norm + box_head_norm')
+              elif _exp == 'E2':
+                  print('  [E2] freeze backbone_0/1/2+proj_norm; train backbone_3(lr×0.1) + detector heads')
                   for p in _teacher.backbone_0.parameters(): p.requires_grad_(False)
                   for p in _teacher.backbone_1.parameters(): p.requires_grad_(False)
                   for p in _teacher.backbone_2.parameters(): p.requires_grad_(False)
@@ -435,10 +449,21 @@ def main(det_cfg, args):
                   for p in _teacher.rpn_norm.parameters(): p.requires_grad_(True)
                   for p in _teacher.box_head_norm.parameters(): p.requires_grad_(True)
                   for p in _dis.parameters(): p.requires_grad_(False)
-                  _b3p = _count(_teacher.backbone_3.parameters())
-                  _rp = _count(_teacher.rpn_norm.parameters())
-                  _bp = _count(_teacher.box_head_norm.parameters())
-                  print('  [E2] backbone_3 params:', _b3p, '(lr×0.1), rpn_norm:', _rp, 'box_head_norm:', _bp, 'total:', _b3p + _rp + _bp)
+                  model_paramters += [{'params': _teacher.backbone_3.parameters(), 'lr': _base_lr * 0.1}]
+                  model_paramters += [{'params': _teacher.rpn_norm.parameters(), 'lr': _base_lr}]
+                  model_paramters += [{'params': _teacher.box_head_norm.parameters(), 'lr': _base_lr}]
+              elif _exp == 'E3':
+                  print('  [E3] multi-step AHDR + three-stage objectives; train render_net + backbone_3 + detector heads')
+                  for p in _teacher.backbone_0.parameters(): p.requires_grad_(False)
+                  for p in _teacher.backbone_1.parameters(): p.requires_grad_(False)
+                  for p in _teacher.backbone_2.parameters(): p.requires_grad_(False)
+                  for p in _teacher.proj_norm.parameters(): p.requires_grad_(False)
+                  for p in _rn.parameters(): p.requires_grad_(True)
+                  for p in _teacher.backbone_3.parameters(): p.requires_grad_(True)
+                  for p in _teacher.rpn_norm.parameters(): p.requires_grad_(True)
+                  for p in _teacher.box_head_norm.parameters(): p.requires_grad_(True)
+                  for p in _dis.parameters(): p.requires_grad_(False)
+                  model_paramters += [{'params': _rn.parameters(), 'lr': _base_lr}]
                   model_paramters += [{'params': _teacher.backbone_3.parameters(), 'lr': _base_lr * 0.1}]
                   model_paramters += [{'params': _teacher.rpn_norm.parameters(), 'lr': _base_lr}]
                   model_paramters += [{'params': _teacher.box_head_norm.parameters(), 'lr': _base_lr}]
