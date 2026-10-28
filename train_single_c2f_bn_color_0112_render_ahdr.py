@@ -212,7 +212,12 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
                     _e3_weights = _model_inner_e3._e3_loss_weights
                     _rec_weight = float(_e3_weights['rec'])
                     _align_weight = float(_e3_weights['align'])
-                    _diag_interval = max(0, int(os.environ.get('SNORM_GRAD_DIAG_INTERVAL', '100')))
+                    # Match the existing evaluation cadence by default, avoiding extra
+                    # diagnostic overhead between fog/night evaluation checkpoints.
+                    _default_diag_interval = 1000 // max(1, (dist_utils.get_world_size() // 2))
+                    _diag_interval = max(0, int(os.environ.get(
+                        'SNORM_GRAD_DIAG_INTERVAL', str(_default_diag_interval)
+                    )))
                     _diag_active = _diag_interval > 0 and global_step % _diag_interval == 0
                     _grad_state = {'stage': 'rec', 'sums': {}}
                     _hook_handles = []
