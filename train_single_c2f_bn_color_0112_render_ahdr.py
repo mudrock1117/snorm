@@ -459,6 +459,8 @@ def main(det_cfg, args):
                   for p in _teacher.backbone_2.parameters(): p.requires_grad_(False)
                   for p in _teacher.proj_norm.parameters(): p.requires_grad_(False)
                   for p in _rn.parameters(): p.requires_grad_(True)
+                  if _sp is not None:
+                      for p in _sp.parameters(): p.requires_grad_(True)
                   for p in _teacher.backbone_3.parameters(): p.requires_grad_(True)
                   for p in _teacher.rpn_norm.parameters(): p.requires_grad_(True)
                   for p in _teacher.box_head_norm.parameters(): p.requires_grad_(True)
