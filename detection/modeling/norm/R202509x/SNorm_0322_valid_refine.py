@@ -1,5 +1,6 @@
 import os
 import torch
+from torch.utils.checkpoint import checkpoint
 import copy
 import random
 import torch.nn as nn
@@ -112,43 +113,38 @@ class SNorm(nn.Module):
     def forward(self, feats, use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=None, targets=None):
         ################## segnet ####################
         if self.training:
-            # E3: two sequential AHDR render passes; used only for detector fine-tuning.
-            # The render network is frozen in E3, but its forward pass remains differentiable.
+            # E3: multi-step residual AHDR chain for detector training.
             if moe_mode == 8:
                 _ema = float(os.environ.get("SNORM_EMA", "0.85"))
                 _res_w = float(os.environ.get("SNORM_RES_W", "0.6"))
-                _anchor_n = self.user_norm_v2(
-                    feats, mode=0, kernel_sz_set=[1, 1],
-                    w_a=1.0, w_u=1.0, ema=1.0
-                )
-                anchor = self.norm_back(_anchor_n)
+                _steps = max(1, min(6, int(os.environ.get("SNORM_STEPS", "6"))))
+                anchor = self.norm_back(self.user_norm_v2(feats, mode=0, kernel_sz_set=[1, 1], w_a=1.0, w_u=1.0, ema=1.0))
+                kernels = [[3, 3], [7, 7], [11, 11], [15, 15], [19, 19]]
+                candidates = [self.norm_back(self.user_norm_v2(feats, mode=0, kernel_sz_set=k, w_a=1.0, w_u=1.0, ema=_ema, eps=1e-5)) for k in kernels]
+                candidates.append(self.norm_back(feats))
 
-                candidate_3 = self.norm_back(self.user_norm_v2(
-                    feats, mode=0, kernel_sz_set=[3, 3],
-                    w_a=1.0, w_u=1.0, ema=_ema, eps=1e-5
-                ))
-                candidate_7 = self.norm_back(self.user_norm_v2(
-                    feats, mode=0, kernel_sz_set=[7, 7],
-                    w_a=1.0, w_u=1.0, ema=_ema, eps=1e-5
-                ))
-                candidate_11 = self.norm_back(self.user_norm_v2(
-                    feats, mode=0, kernel_sz_set=[11, 11],
-                    w_a=1.0, w_u=1.0, ema=_ema, eps=1e-5
-                ))
+                def _ahdr_step(f0, f1, f2):
+                    def _fn(x0, x1, x2):
+                        rendered = self.render_net(x0, x1, x2, return_attn=False)
+                        return rendered[0] if isinstance(rendered, tuple) else rendered
+                    if self.training and torch.is_grad_enabled():
+                        return checkpoint(_fn, f0, f1, f2, use_reentrant=False)
+                    return _fn(f0, f1, f2)
 
-                # AHDR's three-input training API returns (rendered, auxiliary_dict).
-                rendered_1, _aux_1 = self.render_net(candidate_3, anchor, candidate_7)
-                step1 = _res_w * rendered_1 + (1.0 - _res_w) * anchor
-                rendered_2, _aux_2 = self.render_net(candidate_7, step1, candidate_11)
-                output = _res_w * rendered_2 + (1.0 - _res_w) * anchor
-
-                score_input = self.norm_forward(output.detach())
-                score = self.weight_gen_unet2(score_input)
-                output_dict = {
-                    "feature_dict": [output],
-                    "weight_dict": [score],
-                }
-                return output, output_dict
+                output = None
+                for step_idx in range(_steps):
+                    if step_idx == 0:
+                        f0, f1, f2 = candidates[0], anchor, candidates[1]
+                    elif step_idx == 1:
+                        f0, f1, f2 = candidates[1], output, candidates[3]
+                    elif step_idx == 2:
+                        f0, f1, f2 = candidates[2], output, candidates[3]
+                    else:
+                        f0, f1, f2 = candidates[min(step_idx, len(candidates)-1)], output, candidates[min(step_idx+1, len(candidates)-1)]
+                    rendered = _ahdr_step(f0, f1, f2)
+                    output = _res_w * rendered + (1.0 - _res_w) * anchor
+                score = self.weight_gen_unet2(self.norm_forward(output.detach()))
+                return output, {"feature_dict": [output], "weight_dict": [score]}
 
             # global
             if moe_mode == 0:
@@ -370,6 +366,29 @@ class SNorm(nn.Module):
                 return output, output_dict
 
             elif moe_mode == 7:
+                if os.environ.get("SNORM_EXPERIMENT", "E0").upper() == "E3":
+                    _ema = float(os.environ.get("SNORM_EMA", "0.85"))
+                    _res_w = float(os.environ.get("SNORM_RES_W", "0.6"))
+                    _steps = max(1, min(6, int(os.environ.get("SNORM_EVAL_STEPS", "6"))))
+                    anchor = self.norm_back(self.user_norm_v2(feats, mode=0, kernel_sz_set=[1, 1], w_a=1.0, w_u=1.0, ema=1.0))
+                    kernels = [[3, 3], [7, 7], [11, 11], [15, 15], [19, 19]]
+                    candidates = [self.norm_back(self.user_norm_v2(feats, mode=0, kernel_sz_set=k, w_a=1.0, w_u=1.0, ema=_ema, eps=1e-5)) for k in kernels]
+                    candidates.append(self.norm_back(feats))
+                    output = None
+                    for step_idx in range(_steps):
+                        if step_idx == 0:
+                            f0, f1, f2 = candidates[0], anchor, candidates[1]
+                        elif step_idx == 1:
+                            f0, f1, f2 = candidates[1], output, candidates[3]
+                        elif step_idx == 2:
+                            f0, f1, f2 = candidates[2], output, candidates[3]
+                        else:
+                            f0, f1, f2 = candidates[min(step_idx, len(candidates)-1)], output, candidates[min(step_idx+1, len(candidates)-1)]
+                        rendered = self.render_net(f0, f1, f2, return_attn=False)
+                        if isinstance(rendered, tuple):
+                            rendered = rendered[0]
+                        output = _res_w * rendered + (1.0 - _res_w) * anchor
+                    return output, {"feature_dict": [output], "weight_dict": [None], "attn": None, "attn_masks": torch.ones_like(output)}
                 _ema_eval = float(os.environ.get('SNORM_EMA', '0.85'))
                 feats_n = self.user_norm_v2(feats, mode=0, kernel_sz_set=[1, 1], w_a=1.0, w_u=1.0, ema=_ema_eval)
                 feats_raw = self.norm_back(feats_n)
