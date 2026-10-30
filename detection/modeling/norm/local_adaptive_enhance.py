@@ -106,14 +106,14 @@ def _safe_stat(tensor):
     }
 
 
-def _save_gray_map(tensor, path):
+def _save_gray_map(tensor, path, value_min=None, value_max=None):
     """Save one [1,1,H,W] map as an 8-bit grayscale PNG."""
     try:
         from PIL import Image
         value = tensor.detach()[0, 0].float().cpu()
-        lo = value.min()
-        hi = value.max()
-        value = (value - lo) / (hi - lo).clamp_min(1e-8)
+        lo = value.min() if value_min is None else value.new_tensor(value_min)
+        hi = value.max() if value_max is None else value.new_tensor(value_max)
+        value = ((value - lo) / (hi - lo).clamp_min(1e-8)).clamp(0.0, 1.0)
         array = (value.numpy() * 255.0).round().astype("uint8")
         Image.fromarray(array, mode="L").save(path)
     except Exception as exc:
@@ -191,11 +191,14 @@ def _write_local_diagnostics(local_std, deficiency, alpha_raw, alpha_used):
                 _save_gray_map(local_std[item_index:item_index + 1],
                                os.path.join(map_dir, prefix + "_local_std.png"))
                 _save_gray_map(deficiency[item_index:item_index + 1],
-                               os.path.join(map_dir, prefix + "_D_l.png"))
+                               os.path.join(map_dir, prefix + "_D_l.png"),
+                               value_min=0.0, value_max=1.0)
                 _save_gray_map(alpha_raw[item_index:item_index + 1],
-                               os.path.join(map_dir, prefix + "_alpha_raw.png"))
+                               os.path.join(map_dir, prefix + "_alpha_raw.png"),
+                               value_min=alpha_min, value_max=alpha_max)
                 _save_gray_map(alpha_used[item_index:item_index + 1],
-                               os.path.join(map_dir, prefix + "_alpha_used.png"))
+                               os.path.join(map_dir, prefix + "_alpha_used.png"),
+                               value_min=alpha_min, value_max=alpha_max)
 
 
 def enhance_image(images, mode=None):
