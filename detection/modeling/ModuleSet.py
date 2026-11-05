@@ -27,6 +27,7 @@ from detection.modeling.discriminator.InDiscriminator import InstanceDiscriminat
 #from detection.modeling.norm.R202503X.SNorm_0322_valid import SNorm
 #from detection.modeling.norm.R202503X.SNorm_0322_valid_refine import SNorm
 from detection.modeling.norm.R202509x.SNorm_0322_valid_refine import SNorm
+from detection.modeling.norm.local_adaptive_enhance import enhance_image
 #from detection.modeling.norm.R202509x.SNorm_0322_valid_refine_expmamba import SNorm
 
 #
@@ -116,7 +117,12 @@ class ModuleSet(nn.Module):
         self.positive_fraction = positive_fraction
     
     def prev_norm(self, x):
-        
+        # Optional test-time input enhancement. Off by default; no parameters
+        # or extra model are introduced. Keep training inputs unchanged.
+        if not self.training:
+            enhance_mode = os.environ.get('SNORM_IMAGE_ENHANCE', 'off').strip().lower()
+            if enhance_mode not in ('', 'off', 'none', '0', 'false'):
+                x = enhance_image(x, mode=enhance_mode)
         return x
     
     def back_norm_wo_snorm(self, x):
