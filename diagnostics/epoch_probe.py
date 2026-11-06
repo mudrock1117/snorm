@@ -1,6 +1,4 @@
 """Reversible probe for SNorm compute_norm_parameters epoch-boundary updates."""
-from __future__ import annotations
-
 import json
 import random
 from pathlib import Path
