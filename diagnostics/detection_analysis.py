@@ -97,6 +97,22 @@ def _temporary_environment(values: Mapping[str, str]):
                 os.environ[key] = value
 
 
+@contextmanager
+def _temporary_snorm_diagnostics(model: torch.nn.Module):
+    states = []
+    for module in model.modules():
+        if type(module).__name__ == "SNorm" and hasattr(module, "_diag_enabled"):
+            states.append((module, module._diag_enabled, module._diag_call_index))
+            module._diag_enabled = True
+            module._diag_call_index = 0
+    try:
+        yield
+    finally:
+        for module, enabled, call_index in states:
+            module._diag_enabled = enabled
+            module._diag_call_index = call_index
+
+
 @torch.no_grad()
 def run_step_sweep(
     model: torch.nn.Module,
@@ -130,7 +146,7 @@ def run_step_sweep(
                 "SNORM_STEPS": str(max(1, int(step))),
                 "SNORM_ABLATION": "norm_only" if int(step) == 0 else "full",
             }
-            with _temporary_environment(env):
+            with _temporary_environment(env), _temporary_snorm_diagnostics(model):
                 detection = model(images, img_metas, targets, moe_mode=7)[0]
             records.append(
                 {
