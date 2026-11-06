@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -58,6 +59,10 @@ def probe_epoch_boundary(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     original = _snapshot(snorm)
+    python_rng = random.getstate()
+    numpy_rng = np.random.get_state()
+    torch_rng = torch.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
     before_render = render_callback() if render_callback is not None else None
     before_detection = detection_callback() if detection_callback is not None else None
     try:
@@ -97,6 +102,11 @@ def probe_epoch_boundary(
     finally:
         if not apply_update:
             _restore(snorm, original)
+        random.setstate(python_rng)
+        np.random.set_state(numpy_rng)
+        torch.set_rng_state(torch_rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state_all(cuda_rng)
 
 
 def _serialize_detection(value):
