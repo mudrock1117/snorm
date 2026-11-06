@@ -50,15 +50,16 @@ def dataset_index_candidates(dataset, index):
         except (TypeError, KeyError, IndexError):
             continue
 
-    # Metadata helpers are allowed only if they do not call __getitem__. Dataset
-    # implementations commonly expose one of these for evaluator bookkeeping.
-    for name in ("get_img_info", "get_image_info"):
-        method = getattr(dataset, name, None)
-        if callable(method):
-            try:
-                _add_value(candidates, method(index))
-            except Exception:
-                pass
+    # Use metadata helpers only as a fallback. This avoids XML/JSON metadata
+    # parsing when ids/file_names already expose the sample identity.
+    if not candidates:
+        for name in ("get_img_info", "get_image_info"):
+            method = getattr(dataset, name, None)
+            if callable(method):
+                try:
+                    _add_value(candidates, method(index))
+                except Exception:
+                    pass
     return candidates
 
 
