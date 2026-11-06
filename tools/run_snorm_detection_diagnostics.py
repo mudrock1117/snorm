@@ -117,6 +117,7 @@ def main():
     steps = tuple(int(item) for item in args.steps.split(","))
 
     found = set()
+    examples_by_domain = {}
     _log("initializing test datasets (metadata only; no image transforms yet)")
     datasets = build_datasets(
         cfg.DATASETS.TESTS,
@@ -141,6 +142,7 @@ def main():
         matches, examples, routed = find_dataset_indices(
             dataset, domain, wanted, example_limit=8
         )
+        examples_by_domain[domain] = examples
         if not matches:
             _log(
                 "no match in %s; available ID examples: %s"
@@ -227,7 +229,14 @@ def main():
 
     missing = sorted(wanted - found)
     if missing:
-        raise RuntimeError("sample IDs not found: %s" % ", ".join(missing))
+        example_text = "; ".join(
+            "%s=[%s]" % (domain, ", ".join(values) if values else "<none>")
+            for domain, values in sorted(examples_by_domain.items())
+        )
+        raise RuntimeError(
+            "sample IDs not found: %s; available ID examples: %s"
+            % (", ".join(missing), example_text or "<no eligible domain scanned>")
+        )
 
 
 if __name__ == "__main__":
