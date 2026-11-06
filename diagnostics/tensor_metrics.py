@@ -8,8 +8,9 @@ import torch.nn.functional as F
 
 
 def _number(value: torch.Tensor) -> float:
-    value = torch.nan_to_num(value.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
-    return float(value.cpu())
+    value = value.detach().float()
+    value = torch.where(torch.isfinite(value), value, torch.zeros_like(value))
+    return float(value.cpu().item())
 
 
 @torch.no_grad()
@@ -40,7 +41,7 @@ def tensor_metrics(
         "shape": list(x.shape),
         "mean": _number(x.mean()) if x.numel() else 0.0,
         "std": _number(x.std(unbiased=False)) if x.numel() else 0.0,
-        "l2": _number(torch.linalg.vector_norm(x)) if x.numel() else 0.0,
+        "l2": _number(torch.norm(x)) if x.numel() else 0.0,
         "abs_max": _number(x.abs().max()) if x.numel() else 0.0,
         "high_frequency_energy": high_frequency_energy(x),
     }
@@ -51,10 +52,10 @@ def tensor_metrics(
         delta = x - ref
         result.update(
             cosine_to_reference=cosine_similarity(x, ref),
-            change_l2=_number(torch.linalg.vector_norm(delta)),
+            change_l2=_number(torch.norm(delta)),
             change_rate=_number(
-                torch.linalg.vector_norm(delta)
-                / torch.linalg.vector_norm(ref).clamp_min(1e-12)
+                torch.norm(delta)
+                / torch.norm(ref).clamp_min(1e-12)
             ),
         )
     return result
