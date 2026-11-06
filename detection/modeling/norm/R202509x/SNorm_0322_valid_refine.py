@@ -16,6 +16,7 @@ from detection.modeling.conV.tconV import tconV
 from detection.modeling.HDR.OURS.OHDR import AHDR
 from detection.modeling.norm.lib_pert import *
 from diagnostics import DiagnosticRecorder
+from diagnostics.detection_analysis import boxes_to_masks
 
 from torchvision import transforms as v2
 import matplotlib.pyplot as plt
@@ -636,15 +637,21 @@ class SNorm(nn.Module):
                 _all_steps = {}
                 _all_refs = {}
                 _diag = self._new_diagnostic_recorder()
+                _diag_target_masks = None
                 if _diag is not None:
                     _diag.record_inputs(feats, save_im0)
+                    if targets is not None and len(targets) > 0 and 'boxes' in targets[0]:
+                        _diag_target_masks = boxes_to_masks(
+                            targets[0]['boxes'],
+                            (feats.size(-2), feats.size(-1)),
+                        )
 
                 _previous = save_im0 if _diag is not None else None
                 _raw_render = self.render_net(feats_mem[0], save_im0, feats_mem[1])
                 output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                 if _diag is not None:
                     _diag.record_ahdr_step(
-                        1, feats_mem[0], feats_mem[1], _previous, _raw_render, output
+                        1, feats_mem[0], feats_mem[1], _previous, _raw_render, output, _diag_target_masks
                     )
                 if _do_debug:
                     _all_steps[1] = output.clone()
@@ -656,7 +663,7 @@ class SNorm(nn.Module):
                     output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                     if _diag is not None:
                         _diag.record_ahdr_step(
-                            2, feats_mem[1], feats_mem[3], _previous, _raw_render, output
+                            2, feats_mem[1], feats_mem[3], _previous, _raw_render, output, _diag_target_masks
                         )
                     if _do_debug:
                         _all_steps[2] = output.clone()
@@ -668,7 +675,7 @@ class SNorm(nn.Module):
                     output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                     if _diag is not None:
                         _diag.record_ahdr_step(
-                            3, feats_mem[2], feats_mem[3], _previous, _raw_render, output
+                            3, feats_mem[2], feats_mem[3], _previous, _raw_render, output, _diag_target_masks
                         )
                     if _do_debug:
                         _all_steps[3] = output.clone()
@@ -680,7 +687,7 @@ class SNorm(nn.Module):
                     output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                     if _diag is not None:
                         _diag.record_ahdr_step(
-                            4, feats_mem[3], feats_mem[3], _previous, _raw_render, output
+                            4, feats_mem[3], feats_mem[3], _previous, _raw_render, output, _diag_target_masks
                         )
                     if _do_debug:
                         _all_steps[4] = output.clone()
@@ -692,7 +699,7 @@ class SNorm(nn.Module):
                     output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                     if _diag is not None:
                         _diag.record_ahdr_step(
-                            5, feats_mem[4], feats_mem[3], _previous, _raw_render, output
+                            5, feats_mem[4], feats_mem[3], _previous, _raw_render, output, _diag_target_masks
                         )
                     if _do_debug:
                         _all_steps[5] = output.clone()
@@ -709,7 +716,7 @@ class SNorm(nn.Module):
                     output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                     if _diag is not None:
                         _diag.record_ahdr_step(
-                            6, _s6_ref, feats_mem[3], _previous, _raw_render, output
+                            6, _s6_ref, feats_mem[3], _previous, _raw_render, output, _diag_target_masks
                         )
                     if _do_debug:
                         _all_steps[6] = output.clone()
