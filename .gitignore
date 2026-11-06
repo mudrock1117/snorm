@@ -4,8 +4,9 @@ __pycache__/
 *.pyc
 *.pyo
 
-# 忽略数据集（通常太大不需要提交）
-datasets/
+# 仅忽略仓库根目录中的真实数据集。
+# 不要使用无前导斜杠的 datasets/，否则会误伤 detection/data/datasets 源码包。
+/datasets/
 
 # 忽略模型权重（可以单独备份）
 best.pth
