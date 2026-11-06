@@ -1,6 +1,4 @@
 """Non-mutating tensor metrics for SNorm/AHDR diagnostics."""
-from __future__ import annotations
-
 from typing import Dict, Optional
 
 import torch
