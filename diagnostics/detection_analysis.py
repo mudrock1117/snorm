@@ -22,6 +22,38 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+@contextmanager
+def preserve_rng_state():
+    python_state = random.getstate()
+    numpy_state = np.random.get_state()
+    torch_state = torch.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        yield
+    finally:
+        random.setstate(python_state)
+        np.random.set_state(numpy_state)
+        torch.set_rng_state(torch_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
+
+
+def extract_single_detection(model_output):
+    if not isinstance(model_output, (list, tuple)):
+        raise TypeError("FasterRCNN eval output must be a list/tuple of detections")
+    if len(model_output) != 1:
+        raise ValueError(
+            "diagnostic entry requires batch size 1, got %d detections" % len(model_output)
+        )
+    detection = model_output[0]
+    if not isinstance(detection, dict):
+        raise TypeError("single detection must be a dictionary")
+    missing = [key for key in ("boxes", "scores", "labels") if key not in detection]
+    if missing:
+        raise KeyError("detection is missing keys: %s" % ", ".join(missing))
+    return detection
+
+
 @torch.no_grad()
 def boxes_to_masks(
     boxes: torch.Tensor,
@@ -130,12 +162,18 @@ def run_step_sweep(
     with SNORM_STEPS set. RPN proposals/ROI logits are not exposed by FasterRCNN's
     public eval return and are therefore marked unavailable instead of fabricated.
     """
+    if images.ndim != 4 or images.size(0) != 1:
+        raise ValueError("diagnostic entry requires images with batch size 1")
+    if len(img_metas) != 1 or len(targets) != 1:
+        raise ValueError("img_metas and targets must each contain exactly one sample")
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    was_training = model.training
-    model.eval()
+    module_modes = [(module, module.training) for module in model.modules()]
+    rng_context = preserve_rng_state()
+    rng_context.__enter__()
     records = []
     try:
+        model.eval()
         for step in steps:
             seed_everything(seed)
             env = {
@@ -147,7 +185,9 @@ def run_step_sweep(
                 "SNORM_ABLATION": "norm_only" if int(step) == 0 else "full",
             }
             with _temporary_environment(env), _temporary_snorm_diagnostics(model):
-                detection = model(images, img_metas, targets, moe_mode=7)[0]
+                detection = extract_single_detection(
+                    model(images, img_metas, targets, moe_mode=7)
+                )
             records.append(
                 {
                     "sample_id": sample_id,
@@ -158,7 +198,9 @@ def run_step_sweep(
                 }
             )
     finally:
-        model.train(was_training)
+        for module, training in module_modes:
+            module.training = training
+        rng_context.__exit__(None, None, None)
     path = output / ("%s_step_sweep.json" % sample_id)
     path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
