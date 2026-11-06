@@ -35,6 +35,23 @@ def _draw_boxes(image_path, output_path, gt_boxes, detection):
     image.save(output_path)
 
 
+def _validate_geometry(images, img_meta, target):
+    height, width = int(images.size(-2)), int(images.size(-1))
+    if "scale_factor" not in img_meta:
+        raise KeyError("img_meta is missing scale_factor")
+    boxes = target.get("boxes")
+    if boxes is None:
+        raise KeyError("target is missing transformed boxes")
+    if boxes.numel() > 0:
+        if float(boxes.min().item()) < -1.0:
+            raise ValueError("transformed GT boxes contain negative coordinates")
+        if float(boxes[:, 0::2].max().item()) > width + 1.0:
+            raise ValueError("GT x coordinates exceed resized tensor width")
+        if float(boxes[:, 1::2].max().item()) > height + 1.0:
+            raise ValueError("GT y coordinates exceed resized tensor height")
+    return height, width
+
+
 def _sample_candidates(img_meta):
     if not isinstance(img_meta, dict):
         raise TypeError("img_meta must be a dictionary")
@@ -112,6 +129,7 @@ def main():
                 continue
             sample_id = sorted(matched)[0]
             sample_dir = output_root / domain / sample_id
+            _validate_geometry(images, img_metas[0], targets[0])
             images = images.to(device)
             path = run_step_sweep(
                 model, images, img_metas, targets, str(sample_dir),
