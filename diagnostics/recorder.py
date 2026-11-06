@@ -1,6 +1,4 @@
 """Opt-in trace collection for iterative AHDR rendering and epoch boundaries."""
-from __future__ import annotations
-
 import csv
 import json
 import time
