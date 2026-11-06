@@ -60,8 +60,8 @@ def load_detector_checkpoint(model, checkpoint_path, allow_critical_missing=Fals
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     state, source = extract_state_dict(checkpoint)
     incompatible = model.load_state_dict(state, strict=False)
-    missing = list(incompatible.missing_keys)
-    unexpected = list(incompatible.unexpected_keys)
+    missing = list(getattr(incompatible, "missing_keys", []))
+    unexpected = list(getattr(incompatible, "unexpected_keys", []))
     critical_missing = [
         key for key in missing if any(key.startswith(prefix) for prefix in _CRITICAL_PREFIXES)
     ]
