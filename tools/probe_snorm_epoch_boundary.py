@@ -12,7 +12,6 @@ from diagnostics.checkpoint import load_detector_checkpoint
 from diagnostics.detection_analysis import (
     extract_single_detection,
     load_sample_ids,
-    preserve_rng_state,
     seed_everything,
 )
 from diagnostics.epoch_probe import probe_epoch_boundary
@@ -91,13 +90,22 @@ def main():
             model(images, img_metas, targets, moe_mode=7)
         )
 
-    report = probe_epoch_boundary(
-        snorm,
-        output_dir=args.output_dir,
-        render_callback=render_callback,
-        detection_callback=detection_callback,
-        apply_update=False,
-    )
+    diag_enabled = getattr(snorm, "_diag_enabled", False)
+    diag_call_index = getattr(snorm, "_diag_call_index", 0)
+    if hasattr(snorm, "_diag_enabled"):
+        snorm._diag_enabled = False
+    try:
+        report = probe_epoch_boundary(
+            snorm,
+            output_dir=args.output_dir,
+            render_callback=render_callback,
+            detection_callback=detection_callback,
+            apply_update=False,
+        )
+    finally:
+        if hasattr(snorm, "_diag_enabled"):
+            snorm._diag_enabled = diag_enabled
+            snorm._diag_call_index = diag_call_index
     print("probe saved:", report)
     print("SNorm state restored; checkpoint/model state was not permanently modified")
 
