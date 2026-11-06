@@ -624,6 +624,11 @@ class SNorm(nn.Module):
 
             if _ablation == 'norm_only':
                 output = save_im0
+                if self._diag_enabled:
+                    _diag_norm_only = self._new_diagnostic_recorder()
+                    if _diag_norm_only is not None:
+                        _diag_norm_only.record_inputs(feats, save_im0)
+                        _diag_norm_only.flush()
             elif _ablation == 'no_ahdr':
                 output = save_im0
             elif _ablation == 'single_ahdr':
@@ -642,7 +647,7 @@ class SNorm(nn.Module):
                     _diag.record_inputs(feats, save_im0)
                     if targets is not None and len(targets) > 0 and 'boxes' in targets[0]:
                         _diag_target_masks = boxes_to_masks(
-                            targets[0]['boxes'],
+                            targets[0]['boxes'].to(feats.device),
                             (feats.size(-2), feats.size(-1)),
                         )
 
