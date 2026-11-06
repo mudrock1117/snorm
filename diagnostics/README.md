@@ -87,3 +87,87 @@ CUDA_VISIBLE_DEVICES=1 python tools/probe_snorm_epoch_boundary.py \
 ```
 
 探针调用 `compute_norm_parameters()` 前后使用同一固定输入，并在退出前恢复 memory、alpha 参数。当前代码已确认 `memory_index=0` 会使用零 memory 覆盖 alpha；本工具只报告该现象，不改变训练实现。
+
+
+## 服务器兼容性与首次运行顺序
+
+当前配置 `domain_det_s0_moe_bn_color.yaml` 的 `DATASETS.TESTS` 为：
+
+1. `bdd_daytime_fog_test`
+2. `bdd_night_sun_test`
+
+`build_data_loaders(..., is_train=False)` 为每个数据集返回独立 loader，测试 batch 固定为 1；每个 batch 是仓库 collate_fn 产生的 8 元组。诊断入口会验证 batch、`img_metas[0]['img_info']`、`scale_factor`、targets 和 resize 后 boxes，异常时立即停止。GT 和预测框均使用 resize 后检测输入坐标，并覆盖到同尺寸诊断 PNG。
+
+### GPU1 单样本最小诊断
+
+先只在文件中保留一个确实存在的 Fog 文件 stem：
+
+```bash
+printf '%s\n' 'REPLACE_WITH_ONE_FOG_FILE_STEM' > diagnostics/fixed_samples.txt
+```
+
+然后运行：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python tools/run_snorm_detection_diagnostics.py \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color.yaml \
+  --checkpoint /absolute/path/to/checkpoint.pth \
+  --sample-ids diagnostics/fixed_samples.txt \
+  --output-dir /absolute/path/to/new_diag_run \
+  --steps 0,1,6
+```
+
+确认单样本成功后，再把 Fog/Night 固定样本加入列表并运行 `--steps 0,1,2,3,4,5,6`。首次运行不要加 `--save-tensors`，避免 PT 输出占用大量磁盘。
+
+预期路径：
+
+```text
+/new_diag_run/<dataset>/<sample>/
+  <sample>_step_sweep.json
+  overlays/original_gt.png
+  overlays/step00_gt_pred.png
+  overlays/step01_gt_pred.png
+  overlays/step06_gt_pred.png
+  ahdr/steps_<sample>/<sample>_steps_<N>/call_000000/
+    metrics.json
+    steps.csv
+    step00_raw_input.png
+    step00_save_im0.png
+    stepNN_*.png
+```
+
+### GPU1 epoch 边界最小探针
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python tools/probe_snorm_epoch_boundary.py \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color.yaml \
+  --checkpoint /absolute/path/to/checkpoint.pth \
+  --sample-ids diagnostics/fixed_samples.txt \
+  --output-dir /absolute/path/to/new_epoch_probe
+```
+
+入口明确定位训练脚本使用的 `model.teacher.proj_norm`，并要求其类型为 SNorm。探针默认恢复 memory、alpha、dtype/device 及 Python/NumPy/PyTorch/CUDA RNG 状态。
+
+### checkpoint 兼容
+
+支持：
+
+- checkpoint 根对象就是 state-dict；
+- `model`；
+- `state_dict`；
+- `model_state_dict`；
+- `net/network/weights`；
+- 全量 `module.` 前缀。
+
+入口总是打印 state 来源、missing keys 和 unexpected keys。backbone、RPN、ROI head 或 SNorm 关键参数缺失时默认停止。仅用于分析不完整权重时才可显式添加 `--allow-critical-missing`；此时结果不能作为正式对比。
+
+### 常见故障
+
+- `sample IDs not found`：使用数据集 XML/文件中的真实 file name、stem 或 id；先确认 Fog/Night 根目录与配置一致。
+- `8-item batch`：服务器代码的数据集/collate_fn 与当前分支不一致，先核对 checkout commit。
+- `batch size 1`：不要改诊断 loader 的测试 batch；FasterRCNN eval 返回是一项 detection list。
+- `GT coordinates exceed resized tensor`：transforms 或 targets 坐标未同步，不应忽略后继续画框。
+- `critical detector parameters are missing`：checkpoint 身份或封装格式不匹配；先检查输出的 state source 和 key 列表。
+- PNG 缺失但 JSON 存在：检查 `SNORM_DIAG_SAVE_PNG`、Pillow 和输出目录写权限。
+- CUDA OOM：先用一个样本和 `--steps 0,1,6`，不要启用 `--save-tensors`。
+- 旧环境 API 报错：记录 Python、PyTorch、Pillow 版本和完整堆栈，不要升级原训练环境。
