@@ -22,3 +22,14 @@
 - 已增加可逆 epoch 边界探针；确认 `memory_index=0` 时当前实现可能用零 memory 覆盖 alpha，未修改原更新逻辑。
 - 已记录 Guided-AHDR v1 单一机制设计，等待 Fog/Night 真实诊断后再实现。
 - 本轮代码未在本地或 GPU 执行，全部测试与推理待用户服务器验证。
+
+
+## 2026-11-06 服务器验证前兼容性加固
+
+- 已按 FasterRCNN 实际 eval 返回强制 batch=1，并校验 detection list 与 boxes/scores/labels。
+- 已核对测试数据为 Fog/Night 两个独立 loader、8 元组 batch、resize 后 GT 坐标。
+- 已支持多种历史 checkpoint 容器和 module 前缀；关键检测参数缺失默认停止。
+- 已移除 Python 3.7-only future annotations，并替换旧 PyTorch 不兼容 API。
+- step sweep 现在恢复逐模块 train/eval 标志、环境变量及 Python/NumPy/PyTorch/CUDA RNG。
+- epoch probe 明确使用 teacher.proj_norm，恢复 memory、alpha、dtype/device、RNG 和诊断内部状态。
+- 未执行 pytest、CUDA、推理或训练；待服务器首先进行 GPU1 单样本 0/1/6 step 验证。
