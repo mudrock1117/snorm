@@ -44,3 +44,46 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q tests/test_diagnostics.py
 ```
 
 当前 CPU 隔离测试覆盖：输入不变性、禁用模式无副作用、六步记录与区域指标。
+
+
+## 真实六步接入
+
+`SNorm_0322_valid_refine.py` 的 eval full 路径已接入原有 recorder。默认关闭：
+
+```bash
+export SNORM_DIAG=1
+export SNORM_DIAG_DIR=/path/to/new/diagnostics
+export SNORM_DIAG_RUN_ID=fog_night_fixed_v1
+export SNORM_DIAG_SAMPLE_IDS=fog_001,night_001
+export SNORM_DIAG_SAVE_TENSORS=0
+export SNORM_DIAG_SAVE_PNG=1
+```
+
+每个样本按 `run_id/sample_id/call_id` 隔离。JSON/CSV 包含 step delta 与 reference delta；PNG 明确按 raw input `[-1,1]` 或渲染张量 `[0,1]` 转换。旧 `SNORM_DEBUG_SAVE` 不受影响。
+
+## 固定样本检测诊断
+
+样本文件每行写一个 file name、file stem 或 dataset id：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python tools/run_snorm_detection_diagnostics.py \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color.yaml \
+  --checkpoint /external/checkpoints/E2.pth \
+  --sample-ids diagnostics/fixed_samples.txt \
+  --output-dir /new/experiment/diagnostics \
+  --steps 0,1,2,3,4,5,6
+```
+
+该入口独立于 VOC evaluation，并为每个 step 额外调用一次检测器。正常评估次数和协议不变。RPN proposals 与 ROI logits 尚未由公共 eval 返回暴露，JSON 中明确标为 unavailable。
+
+## epoch 边界探针
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python tools/probe_snorm_epoch_boundary.py \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color.yaml \
+  --checkpoint /external/checkpoints/E2.pth \
+  --sample-ids diagnostics/fixed_samples.txt \
+  --output-dir /new/experiment/epoch_probe
+```
+
+探针调用 `compute_norm_parameters()` 前后使用同一固定输入，并在退出前恢复 memory、alpha 参数。当前代码已确认 `memory_index=0` 会使用零 memory 覆盖 alpha；本工具只报告该现象，不改变训练实现。
