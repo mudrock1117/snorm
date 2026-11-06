@@ -26,8 +26,8 @@ def _restore(snorm, state: Dict[str, object]) -> None:
     snorm.memory_index = int(state["memory_index"])
     snorm.memory_aplpha_a[...] = state["memory_aplpha_a"]
     snorm.memory_aplpha_u[...] = state["memory_aplpha_u"]
-    snorm.alpha_ba.data.copy_(state["alpha_ba"].to(snorm.alpha_ba.device))
-    snorm.alpha_bu.data.copy_(state["alpha_bu"].to(snorm.alpha_bu.device))
+    snorm.alpha_ba.data = state["alpha_ba"].detach().clone()
+    snorm.alpha_bu.data = state["alpha_bu"].detach().clone()
 
 
 def _state_summary(state: Dict[str, object]) -> Dict[str, object]:
