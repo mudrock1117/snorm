@@ -32,13 +32,29 @@ def test_records_six_steps_and_regions(tmp_path):
     mask[:2, :2] = 1
     for step in range(1, 7):
         output = reference + step * 0.01
-        recorder.record_ahdr_step(step, reference, guide, output, mask)
+        recorder.record_ahdr_step(
+            step, reference, guide, reference, output, output, mask
+        )
     path = recorder.flush()
     records = json.loads(path.read_text(encoding="utf-8"))
     assert [item["step"] for item in records] == list(range(1, 7))
-    assert all("output_regions" in item for item in records)
+    assert all("blended_regions" in item for item in records)
+    assert all("step_delta" in item and "reference_delta" in item for item in records)
 
 
 def test_region_response_validates_shape():
     with pytest.raises(ValueError):
         region_response(torch.ones(3, 4, 4), torch.ones(4, 4))
+
+
+def test_unique_run_sample_call_directories(tmp_path):
+    value = torch.zeros(1, 3, 4, 4)
+    first = DiagnosticRecorder(
+        str(tmp_path), enabled=True, run_id="run", sample_id="fog/001", call_id="call_1"
+    )
+    second = DiagnosticRecorder(
+        str(tmp_path), enabled=True, run_id="run", sample_id="fog/001", call_id="call_2"
+    )
+    first.record_inputs(value, value)
+    second.record_inputs(value, value)
+    assert first.flush() != second.flush()
