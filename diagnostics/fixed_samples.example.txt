@@ -1,0 +1,5 @@
+# One transformed test sample identifier per line.
+# Accepted values: dataset id, full file name, base name, or file stem.
+# Replace the examples with fixed Fog and Night samples present on the server.
+fog_sample_file_stem
+night_sample_file_stem
