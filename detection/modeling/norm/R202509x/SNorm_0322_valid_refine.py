@@ -15,6 +15,7 @@ from detection.modeling.unet.MedianPool2d import MedianPool2d
 from detection.modeling.conV.tconV import tconV
 from detection.modeling.HDR.OURS.OHDR import AHDR
 from detection.modeling.norm.lib_pert import *
+from diagnostics import DiagnosticRecorder
 
 from torchvision import transforms as v2
 import matplotlib.pyplot as plt
@@ -91,6 +92,37 @@ class SNorm(nn.Module):
         self.iter_test_save = 0
         self.traing_iter_save = 0
         self.traing_iter_scale_save = 0
+
+        # Diagnostics are strictly opt-in. When disabled, no recorder or output
+        # directory is created and the original tensor path is preserved.
+        self._diag_enabled = os.environ.get('SNORM_DIAG', '0') == '1'
+        self._diag_call_index = 0
+
+    def _new_diagnostic_recorder(self):
+        if not self._diag_enabled:
+            return None
+        call_index = self._diag_call_index
+        self._diag_call_index += 1
+        configured_ids = [
+            item.strip()
+            for item in os.environ.get('SNORM_DIAG_SAMPLE_IDS', '').split(',')
+            if item.strip()
+        ]
+        if configured_ids:
+            if call_index >= len(configured_ids):
+                return None
+            sample_id = configured_ids[call_index]
+        else:
+            sample_id = 'sample_%06d' % call_index
+        return DiagnosticRecorder(
+            output_dir=os.environ.get('SNORM_DIAG_DIR', './diagnostics_output'),
+            enabled=True,
+            save_tensors=os.environ.get('SNORM_DIAG_SAVE_TENSORS', '0') == '1',
+            save_png=os.environ.get('SNORM_DIAG_SAVE_PNG', '1') == '1',
+            run_id=os.environ.get('SNORM_DIAG_RUN_ID', 'snorm_eval'),
+            sample_id=sample_id,
+            call_id='call_%06d' % call_index,
+        )
 
     def _clip_internal_params(self):
         self.alpha_ba.data.clamp_(0.1, 10.0)
@@ -603,37 +635,65 @@ class SNorm(nn.Module):
                 _do_debug = _debug_save and _saved < _max_save
                 _all_steps = {}
                 _all_refs = {}
+                _diag = self._new_diagnostic_recorder()
+                if _diag is not None:
+                    _diag.record_inputs(feats, save_im0)
 
-                output = self.render_net(feats_mem[0], save_im0, feats_mem[1])
-                output = output * _res_w + save_im0 * (1 - _res_w)
+                _previous = save_im0 if _diag is not None else None
+                _raw_render = self.render_net(feats_mem[0], save_im0, feats_mem[1])
+                output = _raw_render * _res_w + save_im0 * (1 - _res_w)
+                if _diag is not None:
+                    _diag.record_ahdr_step(
+                        1, feats_mem[0], feats_mem[1], _previous, _raw_render, output
+                    )
                 if _do_debug:
                     _all_steps[1] = output.clone()
                     _all_refs[1] = feats_mem[0].clone()
 
                 if _steps >= 2:
-                    output = self.render_net(feats_mem[1], output, feats_mem[3])
-                    output = output * _res_w + save_im0 * (1 - _res_w)
+                    _previous = output if _diag is not None else None
+                    _raw_render = self.render_net(feats_mem[1], output, feats_mem[3])
+                    output = _raw_render * _res_w + save_im0 * (1 - _res_w)
+                    if _diag is not None:
+                        _diag.record_ahdr_step(
+                            2, feats_mem[1], feats_mem[3], _previous, _raw_render, output
+                        )
                     if _do_debug:
                         _all_steps[2] = output.clone()
                         _all_refs[2] = feats_mem[1].clone()
 
                 if _steps >= 3:
-                    output = self.render_net(feats_mem[2], output, feats_mem[3])
-                    output = output * _res_w + save_im0 * (1 - _res_w)
+                    _previous = output if _diag is not None else None
+                    _raw_render = self.render_net(feats_mem[2], output, feats_mem[3])
+                    output = _raw_render * _res_w + save_im0 * (1 - _res_w)
+                    if _diag is not None:
+                        _diag.record_ahdr_step(
+                            3, feats_mem[2], feats_mem[3], _previous, _raw_render, output
+                        )
                     if _do_debug:
                         _all_steps[3] = output.clone()
                         _all_refs[3] = feats_mem[2].clone()
 
                 if _steps >= 4:
-                    output = self.render_net(feats_mem[3], output, feats_mem[3])
-                    output = output * _res_w + save_im0 * (1 - _res_w)
+                    _previous = output if _diag is not None else None
+                    _raw_render = self.render_net(feats_mem[3], output, feats_mem[3])
+                    output = _raw_render * _res_w + save_im0 * (1 - _res_w)
+                    if _diag is not None:
+                        _diag.record_ahdr_step(
+                            4, feats_mem[3], feats_mem[3], _previous, _raw_render, output
+                        )
                     if _do_debug:
                         _all_steps[4] = output.clone()
                         _all_refs[4] = feats_mem[3].clone()
 
                 if _steps >= 5:
-                    output = self.render_net(feats_mem[4], output, feats_mem[3])
-                    output = output * _res_w + save_im0 * (1 - _res_w)
+                    _previous = output if _diag is not None else None
+                    _raw_render = self.render_net(feats_mem[4], output, feats_mem[3])
+                    output = _raw_render * _res_w + save_im0 * (1 - _res_w)
+                    if _diag is not None:
+                        _diag.record_ahdr_step(
+                            5, feats_mem[4], feats_mem[3], _previous, _raw_render, output
+                        )
                     if _do_debug:
                         _all_steps[5] = output.clone()
                         _all_refs[5] = feats_mem[4].clone()
@@ -644,8 +704,13 @@ class SNorm(nn.Module):
                     _s6_ref = feats_mem[min(_s6_idx, len(feats_mem) - 1)]
                     if _do_debug:
                         _all_refs[6] = _s6_ref.clone()
-                    output = self.render_net(_s6_ref, output, feats_mem[3])
-                    output = output * _res_w + save_im0 * (1 - _res_w)
+                    _previous = output if _diag is not None else None
+                    _raw_render = self.render_net(_s6_ref, output, feats_mem[3])
+                    output = _raw_render * _res_w + save_im0 * (1 - _res_w)
+                    if _diag is not None:
+                        _diag.record_ahdr_step(
+                            6, _s6_ref, feats_mem[3], _previous, _raw_render, output
+                        )
                     if _do_debug:
                         _all_steps[6] = output.clone()
 
@@ -682,6 +747,9 @@ class SNorm(nn.Module):
                     with open(os.path.join(_db_dir, f'step6_data_{_saved:04d}.pkl'), 'wb') as _f:
                         pickle.dump(_db, _f)
                     self._debug_saved = _saved + 1
+
+                if _diag is not None:
+                    _diag.flush()
 
             output = self.norm_forward(output)
             output_dict = {'feature_dict': feats_mem, 'weight_dict': [None]}
