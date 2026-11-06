@@ -208,12 +208,17 @@ class DiagnosticRecorder:
     def record_cuda_memory(self, label: str) -> None:
         if not self.enabled or not torch.cuda.is_available():
             return
+        reserved = (
+            torch.cuda.memory_reserved()
+            if hasattr(torch.cuda, "memory_reserved")
+            else torch.cuda.memory_cached()
+        )
         self.records.append(
             {
                 "kind": "cuda_memory",
                 "label": label,
                 "allocated_bytes": int(torch.cuda.memory_allocated()),
-                "reserved_bytes": int(torch.cuda.memory_reserved()),
+                "reserved_bytes": int(reserved),
                 "max_allocated_bytes": int(torch.cuda.max_memory_allocated()),
             }
         )
