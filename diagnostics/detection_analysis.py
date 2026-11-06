@@ -1,6 +1,4 @@
 """Detection-level diagnostics executed outside the normal VOC evaluation loop."""
-from __future__ import annotations
-
 import json
 import os
 import random
