@@ -11,18 +11,40 @@ from PIL import Image, ImageDraw
 from detection.config import cfg
 from detection.data.build import build_data_loaders
 from detection.modeling.build import build_detectors
+from diagnostics.checkpoint import load_detector_checkpoint
 from diagnostics.detection_analysis import load_sample_ids, run_step_sweep, seed_everything
+
+
+def _rectangle(draw, box, color):
+    left, top, right, bottom = [int(round(value)) for value in box]
+    for offset in range(2):
+        draw.rectangle(
+            (left - offset, top - offset, right + offset, bottom + offset),
+            outline=color,
+        )
 
 
 def _draw_boxes(image_path, output_path, gt_boxes, detection):
     image = Image.open(image_path).convert("RGB")
     draw = ImageDraw.Draw(image)
     for box in gt_boxes:
-        draw.rectangle(tuple(box), outline=(0, 255, 0), width=2)
+        _rectangle(draw, box, (0, 255, 0))
     for box, score in zip(detection.get("boxes", []), detection.get("scores", [])):
         if score >= 0.5:
-            draw.rectangle(tuple(box), outline=(255, 0, 0), width=2)
+            _rectangle(draw, box, (255, 0, 0))
     image.save(output_path)
+
+
+def _sample_candidates(img_meta):
+    if not isinstance(img_meta, dict):
+        raise TypeError("img_meta must be a dictionary")
+    info = img_meta.get("img_info")
+    if not isinstance(info, dict):
+        raise TypeError("img_meta['img_info'] must be a dictionary")
+    file_name = str(info.get("file_name", info.get("id", "unknown")))
+    return info, {
+        file_name, Path(file_name).name, Path(file_name).stem, str(info.get("id", ""))
+    }
 
 
 def main():
@@ -34,6 +56,7 @@ def main():
     parser.add_argument("--steps", default="0,1,2,3,4,5,6")
     parser.add_argument("--seed", type=int, default=20261104)
     parser.add_argument("--save-tensors", action="store_true")
+    parser.add_argument("--allow-critical-missing", action="store_true")
     parser.add_argument("opts", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -44,13 +67,18 @@ def main():
     seed_everything(args.seed)
 
     model = build_detectors(cfg).to(device)
-    checkpoint = torch.load(args.checkpoint, map_location="cpu")
-    state = checkpoint["model"] if "model" in checkpoint else checkpoint
-    incompatible = model.load_state_dict(state, strict=False)
-    print("missing_keys:", incompatible.missing_keys)
-    print("unexpected_keys:", incompatible.unexpected_keys)
+    load_detector_checkpoint(
+        model, args.checkpoint,
+        allow_critical_missing=args.allow_critical_missing,
+    )
     model.eval()
 
+    test_names = list(cfg.DATASETS.TESTS)
+    if not any("fog" in name.lower() for name in test_names):
+        raise ValueError("DATASETS.TESTS has no Fog dataset: %s" % test_names)
+    if not any("night" in name.lower() for name in test_names):
+        raise ValueError("DATASETS.TESTS has no Night dataset: %s" % test_names)
+    print("diagnostic_test_datasets:", test_names)
     wanted = set(load_sample_ids(args.sample_ids))
     if not wanted:
         raise ValueError("sample list is empty")
@@ -70,10 +98,15 @@ def main():
     )
     for loader in loaders:
         domain = loader.dataset.dataset_name
-        for images, img_metas, targets, _, _, _, _, _ in loader:
-            info = img_metas[0]["img_info"]
-            file_name = str(info.get("file_name", info.get("id", "unknown")))
-            candidates = {file_name, Path(file_name).name, Path(file_name).stem, str(info.get("id", ""))}
+        for batch in loader:
+            if not isinstance(batch, (list, tuple)) or len(batch) != 8:
+                raise ValueError("test loader must return the repository's 8-item batch")
+            images, img_metas, targets = batch[0], batch[1], batch[2]
+            if images.ndim != 4 or images.size(0) != 1:
+                raise ValueError("diagnostic loader requires image batch size 1")
+            if len(img_metas) != 1 or len(targets) != 1:
+                raise ValueError("img_metas and targets must each contain one sample")
+            info, candidates = _sample_candidates(img_metas[0])
             matched = wanted.intersection(candidates)
             if not matched:
                 continue
