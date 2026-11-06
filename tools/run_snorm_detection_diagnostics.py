@@ -88,6 +88,16 @@ def main():
             gt_boxes = targets[0]["boxes"].detach().cpu().tolist()
             overlay_dir = sample_dir / "overlays"
             overlay_dir.mkdir(parents=True, exist_ok=True)
+            first_trace = (
+                sample_dir / "ahdr" / ("steps_%s" % sample_id)
+                / ("%s_steps_%d" % (sample_id, int(steps[0]))) / "call_000000"
+            )
+            raw_input_path = first_trace / "step00_raw_input.png"
+            if raw_input_path.exists():
+                _draw_boxes(
+                    raw_input_path, overlay_dir / "original_gt.png",
+                    gt_boxes, {"boxes": [], "scores": []},
+                )
             for record in records:
                 step = int(record["steps"])
                 trace_dir = (
