@@ -171,3 +171,39 @@ CUDA_VISIBLE_DEVICES=1 python tools/probe_snorm_epoch_boundary.py \
 - PNG 缺失但 JSON 存在：检查 `SNORM_DIAG_SAVE_PNG`、Pillow 和输出目录写权限。
 - CUDA OOM：先用一个样本和 `--steps 0,1,6`，不要启用 `--save-tensors`。
 - 旧环境 API 报错：记录 Python、PyTorch、Pillow 版本和完整堆栈，不要升级原训练环境。
+
+
+## 固定样本快速索引
+
+诊断入口不再遍历完整 test loader。流程为：
+
+1. 使用 `build_datasets` 初始化原 Fog/Night dataset 和原测试 transforms；
+2. 只扫描 dataset 已有的 `ids/image_ids/image_set_index/file_names/data_infos` 等元数据；
+3. 同时比较完整名称、`Path(name).name` 和 `Path(name).stem`；
+4. 对命中索引构造 `torch.utils.data.Subset`；
+5. 仅该 Subset 通过原 dataset `__getitem__`、原 transforms 和原 8 元组 `collate_fn` 加载。
+
+ID 中含 `fog` 时不会扫描 Night dataset；含 `night` 时不会扫描 Fog dataset。也可显式写成 `fog:<id>`、`night:<id>` 或 `<dataset_name>:<id>`。
+
+运行时日志依次显示 dataset 初始化、元数据匹配、单图加载、每个 AHDR step 开始/结束和文件保存。匹配失败会给出各已扫描域的可用 ID 示例。
+
+## detection/data/datasets 源码包缺失
+
+根因是历史 `.gitignore` 使用了无前导斜杠的 `datasets/`。该规则会递归匹配任何层级的同名目录，因此不仅忽略根数据集，也错误忽略 `detection/data/datasets/` Python 源码包。仓库没有 `.gitmodules`，所以它也不是可自动恢复的 Git submodule。
+
+当前分支已把规则改为仅忽略根数据目录：
+
+```gitignore
+/datasets/
+```
+
+这只允许未来跟踪嵌套源码包，并不会凭空恢复缺失文件。安全恢复步骤：
+
+1. 保留服务器当前软链接，先不要删除或覆盖；
+2. 对 E2 工作树的 `detection/data/datasets` 执行只读文件清单、Git 状态和 SHA256 记录；
+3. 确认其中只有 Python 源码/必要小型元数据，不含真实图像、标注副本、缓存或权重；
+4. 与历史 E2 实际运行版本核对 imports 和文件内容；
+5. 经确认后，从 E2 工作树复制到独立临时目录，审查 diff，再显式 `git add detection/data/datasets` 提交；
+6. 提交后在新 checkout 验证模块可导入，再移除服务器临时软链接。
+
+在完成来源核验前，不应把软链接目标或未经审查的整个目录直接上传 GitHub。
