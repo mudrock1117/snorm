@@ -122,7 +122,7 @@ class DiagnosticRecorder:
         previous_output: torch.Tensor,
         raw_render: torch.Tensor,
         blended_output: torch.Tensor,
-        target_mask: Optional[torch.Tensor] = None,
+        target_masks: Optional[Mapping[str, torch.Tensor]] = None,
     ) -> None:
         if not self.enabled:
             return
@@ -145,10 +145,17 @@ class DiagnosticRecorder:
             "step_delta": tensor_metrics(step_delta),
             "reference_delta": tensor_metrics(reference_delta),
         }
-        if target_mask is not None:
-            entry["reference_regions"] = region_response(reference, target_mask)
-            entry["blended_regions"] = region_response(blended_output, target_mask)
-            entry["step_delta_regions"] = region_response(step_delta, target_mask)
+        if torch.is_tensor(target_masks):
+            target_masks = {"all": target_masks}
+        if target_masks is not None:
+            entry["regions"] = {
+                name: {
+                    "reference": region_response(reference, mask),
+                    "blended_output": region_response(blended_output, mask),
+                    "step_delta": region_response(step_delta, mask),
+                }
+                for name, mask in target_masks.items()
+            }
         self.records.append(entry)
         prefix = "step%02d" % step
         self._save_png(prefix + "_reference", reference, "zero_one")
