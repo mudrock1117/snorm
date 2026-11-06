@@ -33,3 +33,14 @@
 - step sweep 现在恢复逐模块 train/eval 标志、环境变量及 Python/NumPy/PyTorch/CUDA RNG。
 - epoch probe 明确使用 teacher.proj_norm，恢复 memory、alpha、dtype/device、RNG 和诊断内部状态。
 - 未执行 pytest、CUDA、推理或训练；待服务器首先进行 GPU1 单样本 0/1/6 step 验证。
+
+
+## 2026-11-06 固定样本加载优化
+
+- 检测诊断不再遍历完整 test loader；改为扫描 dataset 索引元数据后构建单样本 Subset。
+- 保留原 dataset __getitem__、测试 transforms、img_meta/target/scale_factor 和 8 元组 collate。
+- Fog/Night 按 ID 内容或显式域前缀路由；Fog ID 不再扫描 Night。
+- 增加 dataset 初始化、匹配、单图加载、step 推理和保存日志；失败时输出 ID 示例。
+- Path(file_name).stem 同时用于索引匹配和变换后 img_meta 二次校验。
+- 确认历史 .gitignore 的 datasets/ 误伤 detection/data/datasets；已改为 /datasets/，源码包仍待服务器来源核验后单独归档。
+- 未执行数据加载、推理或测试，待服务器 GPU1 单样本验证。
