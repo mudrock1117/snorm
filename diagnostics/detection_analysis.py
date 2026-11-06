@@ -2,6 +2,7 @@
 import json
 import os
 import random
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, Sequence, Tuple
@@ -10,6 +11,11 @@ import numpy as np
 import torch
 
 from .tensor_metrics import high_frequency_energy, tensor_metrics
+
+
+def _progress(message):
+    print("[SNORM-DIAG] %s" % message)
+    sys.stdout.flush()
 
 
 def seed_everything(seed: int) -> None:
@@ -173,6 +179,7 @@ def run_step_sweep(
     try:
         model.eval()
         for step in steps:
+            _progress("sample=%s step=%d inference start" % (sample_id, int(step)))
             seed_everything(seed)
             env = {
                 "SNORM_DIAG": "1",
@@ -195,12 +202,14 @@ def run_step_sweep(
                     "roi_logits": "unavailable: not exposed by public eval return",
                 }
             )
+            _progress("sample=%s step=%d inference end" % (sample_id, int(step)))
     finally:
         for module, training in module_modes:
             module.training = training
         rng_context.__exit__(None, None, None)
     path = output / ("%s_step_sweep.json" % sample_id)
     path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+    _progress("saved detector sweep: %s" % path)
     return path
 
 
