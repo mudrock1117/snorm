@@ -38,7 +38,7 @@ def test_records_six_steps_and_regions(tmp_path):
     path = recorder.flush()
     records = json.loads(path.read_text(encoding="utf-8"))
     assert [item["step"] for item in records] == list(range(1, 7))
-    assert all("blended_regions" in item for item in records)
+    assert all("regions" in item and "all" in item["regions"] for item in records)
     assert all("step_delta" in item and "reference_delta" in item for item in records)
 
 
