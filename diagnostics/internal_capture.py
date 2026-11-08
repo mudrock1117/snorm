@@ -39,6 +39,7 @@ class DetectionInternalCapture(object):
         self.save_tensors = bool(save_tensors)
         self.handles = []
         self.raw = {}
+        self.rpn_proposals_cpu = None
         self.summary = {
             "step": self.step,
             "comparison_warning": (
@@ -52,6 +53,10 @@ class DetectionInternalCapture(object):
             self.summary["rpn_error"] = "unexpected RPN output structure"
             return
         proposals, _, objectness_logits, decoded_bbox_map = output
+        # Proposals are modest compared with dense RPN logits and are required
+        # for class-agnostic GT coverage. Clone immediately so later steps cannot
+        # overwrite or alias this forward's values.
+        self.rpn_proposals_cpu = [_clone_cpu(item) for item in proposals]
         self.summary["rpn"] = {
             "module": "teacher.rpn_norm",
             "proposal_counts": [int(item.shape[0]) for item in proposals],
@@ -67,7 +72,9 @@ class DetectionInternalCapture(object):
             ),
         }
         if self.save_tensors:
-            self.raw["rpn_proposals"] = [_clone_cpu(item) for item in proposals]
+            self.raw["rpn_proposals"] = [
+                item.clone() for item in self.rpn_proposals_cpu
+            ]
             self.raw["rpn_objectness_logits"] = _clone_cpu(objectness_logits)
             self.raw["rpn_decoded_bbox_map"] = _clone_cpu(decoded_bbox_map)
 
