@@ -272,3 +272,47 @@ internals/step06_internal.json
 这会生成 `stepNN_internal.pt`，可能占用较大内存和磁盘。proposals 数量和 ROI 行在每个 Step 都会因 RPN/NMS 独立变化，不允许按数组索引跨 Step 对齐。跨 Step 对比应使用 GT/class/IoU 或空间匹配。
 
 hook 仅注册到 `teacher.rpn_norm` 与 `teacher.box_head_norm`，forward 结束立即移除，不修改返回值。若服务器实际模块输出结构不是 RPN 4 项或 BoxHead 9 项，JSON 会记录 `rpn_error/roi_error`，而不是伪造数据。
+
+
+## Fog30 + Night30 批量诊断
+
+固定样本不是连续取前 30 张。选择器按整个数据集索引范围分层，每层用固定种子抽取一个样本，保存实际 sample ID 清单与 manifest，确保重复运行使用同一集合：
+
+```bash
+python tools/select_snorm_diagnostic_samples.py \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color.yaml \
+  --output-ids /home/ubuntu/hdx/diag_fog30_night30/sample_ids.txt \
+  --output-manifest /home/ubuntu/hdx/diag_fog30_night30/sample_manifest.json \
+  --count-per-domain 30 \
+  --seed 20261108
+```
+
+然后在 GPU1 上运行 Step 0/1/6。必须启用内部采集以取得 RPN proposals，但默认不保存大型原始 tensor：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python tools/run_snorm_detection_diagnostics.py \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color.yaml \
+  --checkpoint /home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/s0_dbias_color_E2_zdh/E2/best.pth \
+  --sample-ids /home/ubuntu/hdx/diag_fog30_night30/sample_ids.txt \
+  --output-dir /home/ubuntu/hdx/diag_fog30_night30/reports \
+  --steps 0,1,6 \
+  --match-score-threshold 0.5 \
+  --match-iou-threshold 0.5 \
+  --rpn-fn-iou-threshold 0.5 \
+  --capture-internals
+```
+
+RPN coverage 对每个 GT 独立计算其与当前 Step 全部 proposals 的最大 IoU，报告 Recall@0.3/0.5/0.7；最终 FN 按 `--rpn-fn-iou-threshold` 分成 `rpn_uncovered` 与 `rpn_covered_detection_failure`。不同 Step 的 proposal/ROI 数组不会按索引对齐。small/medium/large 使用 resize 后检测坐标中的面积阈值 32²/96²。
+
+生成汇总：
+
+```bash
+python tools/summarize_snorm_batch.py \
+  --report-root /home/ubuntu/hdx/diag_fog30_night30/reports \
+  --output-dir /home/ubuntu/hdx/diag_fog30_night30/summary
+
+cat /home/ubuntu/hdx/diag_fog30_night30/summary/batch_summary.txt
+column -s, -t /home/ubuntu/hdx/diag_fog30_night30/summary/batch_summary.csv | less -S
+```
+
+输出包括 Fog、Night 与 overall 的 GT/TP/FP/FN、Precision/Recall、RPN Recall、尺度 Recall 和两类 FN 数量，并在 JSON 中保存实际 sample IDs。所有结果只是固定样本诊断汇总，**不是 VOC mAP**。抽样器用索引分层保证覆盖测试集范围，不能在推理前保证 GT 数量/尺度严格平衡；实际分布由汇总中的 GT 与尺度计数核验。
