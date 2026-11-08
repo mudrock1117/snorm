@@ -200,6 +200,7 @@ def analyze_step_sweep(
     sample_id,
     iou_threshold=0.5,
     score_threshold=0.0,
+    rpn_fn_iou_threshold=0.5,
 ):
     gt_boxes = _as_list(target["boxes"])
     gt_labels = [int(value) for value in _as_list(target["labels"])]
@@ -212,6 +213,34 @@ def analyze_step_sweep(
             score_threshold=score_threshold,
         )
         matched["step"] = step
+        coverage = record.get("rpn_gt_coverage")
+        if isinstance(coverage, dict) and "per_gt" in coverage:
+            coverage_by_gt = {
+                int(item["gt_index"]): item for item in coverage["per_gt"]
+            }
+            rpn_uncovered = 0
+            detection_failure = 0
+            for gt_index in matched["unmatched_gt_indices"]:
+                item = coverage_by_gt.get(gt_index)
+                if (
+                    item is None
+                    or item["best_proposal_iou"] < float(rpn_fn_iou_threshold)
+                ):
+                    rpn_uncovered += 1
+                else:
+                    detection_failure += 1
+            matched["rpn_gt_coverage"] = coverage
+            matched["fn_sources"] = {
+                "rpn_uncovered": rpn_uncovered,
+                "rpn_covered_detection_failure": detection_failure,
+                "coverage_iou_threshold": float(rpn_fn_iou_threshold),
+            }
+        else:
+            matched["rpn_gt_coverage"] = coverage
+            matched["fn_sources"] = {
+                "unavailable": True,
+                "reason": "RPN internal capture was not enabled",
+            }
         step_results.append(matched)
 
     per_gt = []
@@ -220,10 +249,29 @@ def analyze_step_sweep(
             "gt_index": gt_index,
             "label": label,
             "box": box,
+            "scale": object_scale(box),
             "steps": {},
         }
         for result in step_results:
             match = result["gt_matches"].get(str(gt_index))
+            coverage = result.get("rpn_gt_coverage")
+            coverage_item = None
+            if isinstance(coverage, dict):
+                for item in coverage.get("per_gt", []):
+                    if int(item["gt_index"]) == gt_index:
+                        coverage_item = item
+                        break
+            rpn_iou = (
+                coverage_item["best_proposal_iou"]
+                if coverage_item is not None else None
+            )
+            fn_source = None
+            if match is None and rpn_iou is not None:
+                fn_source = (
+                    "rpn_uncovered"
+                    if rpn_iou < float(rpn_fn_iou_threshold)
+                    else "rpn_covered_detection_failure"
+                )
             comparison["steps"][str(result["step"])] = {
                 "detected": match is not None,
                 "score": match["score"] if match is not None else None,
@@ -231,6 +279,8 @@ def analyze_step_sweep(
                 "prediction_index": (
                     match["prediction_index"] if match is not None else None
                 ),
+                "rpn_best_iou": rpn_iou,
+                "fn_source": fn_source,
             }
         per_gt.append(comparison)
 
@@ -243,6 +293,13 @@ def analyze_step_sweep(
         "sample_id": sample_id,
         "iou_threshold": float(iou_threshold),
         "score_threshold": float(score_threshold),
+        "rpn_fn_iou_threshold": float(rpn_fn_iou_threshold),
+        "scale_definition": {
+            "coordinate_system": "resized detector input",
+            "small": "area < 32^2",
+            "medium": "32^2 <= area < 96^2",
+            "large": "area >= 96^2",
+        },
         "gt_count": len(gt_boxes),
         "steps": step_results,
         "per_gt_comparison": per_gt,
@@ -258,8 +315,8 @@ def analyze_step_sweep(
     csv_path = output / "gt_step_changes.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as stream:
         fields = [
-            "gt_index", "label", "step", "detected", "score", "iou",
-            "prediction_index",
+            "gt_index", "label", "scale", "step", "detected", "score", "iou",
+            "prediction_index", "rpn_best_iou", "fn_source",
         ]
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
@@ -271,11 +328,14 @@ def analyze_step_sweep(
                     {
                         "gt_index": item["gt_index"],
                         "label": item["label"],
+                        "scale": item["scale"],
                         "step": step,
                         "detected": values["detected"],
                         "score": values["score"],
                         "iou": values["iou"],
                         "prediction_index": values["prediction_index"],
+                        "rpn_best_iou": values["rpn_best_iou"],
+                        "fn_source": values["fn_source"],
                     }
                 )
 
@@ -286,11 +346,26 @@ def analyze_step_sweep(
         % (sample_id, float(iou_threshold), float(score_threshold)),
     ]
     for result in step_results:
+        fn_sources = result.get("fn_sources", {})
+        rpn_text = ""
+        coverage = result.get("rpn_gt_coverage")
+        if isinstance(coverage, dict) and "thresholds" in coverage:
+            rpn_text = " RPN@0.3=%.4f RPN@0.5=%.4f RPN@0.7=%.4f" % (
+                coverage["thresholds"]["0.3"]["recall"],
+                coverage["thresholds"]["0.5"]["recall"],
+                coverage["thresholds"]["0.7"]["recall"],
+            )
         lines.append(
-            "step=%d TP=%d FP=%d FN=%d eligible_predictions=%d"
+            (
+                "step=%d TP=%d FP=%d FN=%d eligible_predictions=%d "
+                "rpn_uncovered_fn=%s covered_detection_failure_fn=%s%s"
+            )
             % (
                 result["step"], result["tp"], result["fp"], result["fn"],
                 result["eligible_prediction_count"],
+                fn_sources.get("rpn_uncovered", "NA"),
+                fn_sources.get("rpn_covered_detection_failure", "NA"),
+                rpn_text,
             )
         )
     for item in per_gt:
