@@ -41,6 +41,75 @@ def box_iou(box_a, box_b):
     return intersection / union if union > 0.0 else 0.0
 
 
+def object_scale(box):
+    area = max(0.0, float(box[2]) - float(box[0])) * max(
+        0.0, float(box[3]) - float(box[1])
+    )
+    if area < 32.0 * 32.0:
+        return "small"
+    if area < 96.0 * 96.0:
+        return "medium"
+    return "large"
+
+
+def rpn_gt_coverage(proposals, gt_boxes, thresholds=(0.3, 0.5, 0.7)):
+    """Class-agnostic proposal coverage in resized detector coordinates."""
+    proposal_boxes = _as_list(proposals)
+    gt_box_list = _as_list(gt_boxes)
+    per_gt = []
+    for gt_index, gt_box in enumerate(gt_box_list):
+        best_iou = 0.0
+        best_proposal_index = None
+        for proposal_index, proposal in enumerate(proposal_boxes):
+            iou = box_iou(proposal, gt_box)
+            if iou > best_iou:
+                best_iou = iou
+                best_proposal_index = proposal_index
+        per_gt.append(
+            {
+                "gt_index": gt_index,
+                "scale": object_scale(gt_box),
+                "best_proposal_iou": float(best_iou),
+                "best_proposal_index": best_proposal_index,
+            }
+        )
+
+    recalls = {}
+    per_scale = {}
+    for threshold in thresholds:
+        key = "%.1f" % float(threshold)
+        covered = sum(
+            1 for item in per_gt
+            if item["best_proposal_iou"] >= float(threshold)
+        )
+        recalls[key] = {
+            "covered": covered,
+            "gt_count": len(per_gt),
+            "recall": float(covered) / len(per_gt) if per_gt else 0.0,
+        }
+        per_scale[key] = {}
+        for scale in ("small", "medium", "large"):
+            items = [item for item in per_gt if item["scale"] == scale]
+            scale_covered = sum(
+                1 for item in items
+                if item["best_proposal_iou"] >= float(threshold)
+            )
+            per_scale[key][scale] = {
+                "covered": scale_covered,
+                "gt_count": len(items),
+                "recall": (
+                    float(scale_covered) / len(items) if items else 0.0
+                ),
+            }
+    return {
+        "coordinate_system": "resized detector input coordinates",
+        "proposal_count": len(proposal_boxes),
+        "thresholds": recalls,
+        "per_scale": per_scale,
+        "per_gt": per_gt,
+    }
+
+
 def match_step(detections, gt_boxes, gt_labels, iou_threshold, score_threshold):
     pred_boxes = detections.get("boxes", [])
     pred_scores = detections.get("scores", [])
