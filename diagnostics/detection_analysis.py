@@ -217,8 +217,8 @@ def run_step_sweep(
                     detection = extract_single_detection(
                         model(images, img_metas, targets, moe_mode=7)
                     )
-                    rpn_value = "unavailable: internal capture disabled"
-                    roi_value = "unavailable: internal capture disabled"
+                    rpn_value = "unavailable: not exposed by public eval return"
+                    roi_value = "unavailable: not exposed by public eval return"
                     internal_file = None
             records.append(
                 {
