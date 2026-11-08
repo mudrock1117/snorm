@@ -1,10 +1,12 @@
 """Metadata-only fixed-sample lookup for repository datasets."""
-from pathlib import Path
 import random
 
 from torch.utils.data import DataLoader, Subset
 
 from detection.data import collate_fn
+
+
+_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
 
 
 _INDEX_ATTRIBUTES = (
@@ -17,6 +19,22 @@ _INDEX_ATTRIBUTES = (
     "data_infos",
     "images",
 )
+
+
+def strip_image_extension(value):
+    """Remove only a recognized image suffix; preserve dots inside sample IDs."""
+    text = str(value)
+    lower = text.lower()
+    for extension in _IMAGE_EXTENSIONS:
+        if lower.endswith(extension):
+            return text[:-len(extension)]
+    return text
+
+
+def canonicalize_sample_id(value):
+    """Return a path-free ID while preserving Foggy Cityscapes beta decimals."""
+    file_name = str(value).replace("\\", "/").rsplit("/", 1)[-1]
+    return strip_image_extension(file_name)
 
 
 def _add_value(candidates, value):
@@ -34,8 +52,9 @@ def _add_value(candidates, value):
     if isinstance(value, (str, int)):
         text = str(value)
         candidates.add(text)
-        candidates.add(Path(text).name)
-        candidates.add(Path(text).stem)
+        file_name = text.replace("\\\\", "/").rsplit("/", 1)[-1]
+        candidates.add(file_name)
+        candidates.add(canonicalize_sample_id(file_name))
 
 
 def dataset_index_candidates(dataset, index):
@@ -111,8 +130,8 @@ def find_dataset_indices(dataset, dataset_name, requested, example_limit=8):
         for identifier in domain_requested:
             identifier_candidates = {
                 identifier,
-                Path(identifier).name,
-                Path(identifier).stem,
+                str(identifier).replace("\\", "/").rsplit("/", 1)[-1],
+                canonicalize_sample_id(identifier),
             }
             if candidates.intersection(identifier_candidates):
                 matches[identifier] = index
@@ -146,17 +165,17 @@ def canonical_sample_id(dataset, index, dataset_name):
     if "night" in lower_name:
         domain_tokens.append("night")
 
+    normalized = set(canonicalize_sample_id(value) for value in candidates)
+
     def score(value):
         lower = value.lower()
         return (
             1 if any(token in lower for token in domain_tokens) else 0,
-            1 if "/" not in value and "\\" not in value else 0,
-            1 if "." not in Path(value).name else 0,
             value.count("_"),
             len(value),
         )
 
-    return max(candidates, key=score)
+    return max(normalized, key=score)
 
 
 def stratified_sample_indices(length, count, seed, dataset_name):
