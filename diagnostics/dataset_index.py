@@ -1,5 +1,6 @@
 """Metadata-only fixed-sample lookup for repository datasets."""
 from pathlib import Path
+import random
 
 from torch.utils.data import DataLoader, Subset
 
@@ -130,3 +131,49 @@ def build_subset_loader(dataset, indices):
         num_workers=0,
         collate_fn=collate_fn,
     )
+
+
+def canonical_sample_id(dataset, index, dataset_name):
+    candidates = dataset_index_candidates(dataset, index)
+    if not candidates:
+        raise RuntimeError(
+            "dataset index %d exposes no metadata identifier" % int(index)
+        )
+    domain_tokens = []
+    lower_name = dataset_name.lower()
+    if "fog" in lower_name:
+        domain_tokens.append("fog")
+    if "night" in lower_name:
+        domain_tokens.append("night")
+
+    def score(value):
+        lower = value.lower()
+        return (
+            1 if any(token in lower for token in domain_tokens) else 0,
+            1 if "/" not in value and "\\" not in value else 0,
+            1 if "." not in Path(value).name else 0,
+            value.count("_"),
+            len(value),
+        )
+
+    return max(candidates, key=score)
+
+
+def stratified_sample_indices(length, count, seed, dataset_name):
+    """One deterministic random index per evenly spaced dataset stratum."""
+    length = int(length)
+    count = min(int(count), length)
+    if count <= 0:
+        return []
+    stable_offset = sum(ord(char) for char in str(dataset_name))
+    generator = random.Random(int(seed) + stable_offset)
+    indices = []
+    for stratum in range(count):
+        start = (stratum * length) // count
+        end = ((stratum + 1) * length) // count
+        if end <= start:
+            index = start
+        else:
+            index = generator.randrange(start, end)
+        indices.append(index)
+    return sorted(set(indices))
