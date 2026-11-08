@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from diagnostics import DiagnosticRecorder, region_response, tensor_metrics
+from diagnostics.dataset_index import canonicalize_sample_id
 
 
 def test_tensor_metrics_do_not_mutate_input():
@@ -58,3 +59,11 @@ def test_unique_run_sample_call_directories(tmp_path):
     first.record_inputs(value, value)
     second.record_inputs(value, value)
     assert first.flush() != second.flush()
+
+
+def test_sample_id_canonicalization_preserves_fog_beta_decimal():
+    assert canonicalize_sample_id("xxx_beta_0.02.jpg") == "xxx_beta_0.02"
+    assert canonicalize_sample_id("xxx_beta_0.02") == "xxx_beta_0.02"
+    assert canonicalize_sample_id("ordinary.jpg") == "ordinary"
+    assert canonicalize_sample_id("ordinary.png") == "ordinary"
+    assert canonicalize_sample_id("/images/xxx_beta_0.02.JPEG") == "xxx_beta_0.02"
