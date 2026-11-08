@@ -14,6 +14,7 @@ from detection.data.build import build_datasets
 from detection.modeling.build import build_detectors
 from diagnostics.checkpoint import load_detector_checkpoint
 from diagnostics.detection_analysis import load_sample_ids, run_step_sweep, seed_everything
+from diagnostics.gt_matching import analyze_step_sweep, save_ground_truth
 from diagnostics.dataset_index import (
     build_subset_loader,
     find_dataset_indices,
@@ -85,6 +86,10 @@ def main():
     parser.add_argument("--seed", type=int, default=20261104)
     parser.add_argument("--save-tensors", action="store_true")
     parser.add_argument("--allow-critical-missing", action="store_true")
+    parser.add_argument("--match-iou-threshold", type=float, default=0.5)
+    parser.add_argument("--match-score-threshold", type=float, default=0.0)
+    parser.add_argument("--capture-internals", action="store_true")
+    parser.add_argument("--save-internal-tensors", action="store_true")
     parser.add_argument("opts", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -191,8 +196,25 @@ def main():
             path = run_step_sweep(
                 model, images, img_metas, targets, str(sample_dir),
                 sample_id=sample_id, steps=steps, seed=args.seed,
+                capture_internals=args.capture_internals,
+                save_internal_tensors=args.save_internal_tensors,
             )
             records = json.loads(path.read_text(encoding="utf-8"))
+            gt_path = save_ground_truth(
+                targets[0], img_metas[0], sample_dir / "ground_truth.json"
+            )
+            _, match_json, match_csv, match_summary = analyze_step_sweep(
+                records,
+                targets[0],
+                sample_dir,
+                sample_id,
+                iou_threshold=args.match_iou_threshold,
+                score_threshold=args.match_score_threshold,
+            )
+            _log(
+                "GT analysis saved: %s, %s, %s, %s"
+                % (gt_path, match_json, match_csv, match_summary)
+            )
             gt_boxes = targets[0]["boxes"].detach().cpu().tolist()
             overlay_dir = sample_dir / "overlays"
             overlay_dir.mkdir(parents=True, exist_ok=True)
