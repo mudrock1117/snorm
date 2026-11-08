@@ -7,6 +7,18 @@ import numpy as np
 import torch
 
 
+def _json_value(value):
+    if torch.is_tensor(value):
+        return value.detach().cpu().tolist()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    return value
+
+
 def _as_list(value):
     if torch.is_tensor(value):
         return value.detach().cpu().tolist()
@@ -214,8 +226,8 @@ def analyze_step_sweep(
 def save_ground_truth(target, img_meta, path):
     payload = {
         "coordinate_system": "resized detector input coordinates",
-        "scale_factor": img_meta.get("scale_factor"),
-        "img_shape": img_meta.get("img_shape"),
+        "scale_factor": _json_value(img_meta.get("scale_factor")),
+        "img_shape": _json_value(img_meta.get("img_shape")),
         "boxes": _as_list(target["boxes"]),
         "labels": [int(value) for value in _as_list(target["labels"])],
     }
