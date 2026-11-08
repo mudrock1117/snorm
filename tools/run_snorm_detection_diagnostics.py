@@ -88,6 +88,7 @@ def main():
     parser.add_argument("--allow-critical-missing", action="store_true")
     parser.add_argument("--match-iou-threshold", type=float, default=0.5)
     parser.add_argument("--match-score-threshold", type=float, default=0.0)
+    parser.add_argument("--rpn-fn-iou-threshold", type=float, default=0.5)
     parser.add_argument("--capture-internals", action="store_true")
     parser.add_argument("--save-internal-tensors", action="store_true")
     parser.add_argument("opts", nargs=argparse.REMAINDER)
@@ -212,6 +213,7 @@ def main():
                 sample_id,
                 iou_threshold=args.match_iou_threshold,
                 score_threshold=args.match_score_threshold,
+                rpn_fn_iou_threshold=args.rpn_fn_iou_threshold,
             )
             _log(
                 "GT analysis saved: %s, %s, %s, %s"
