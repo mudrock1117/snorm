@@ -106,6 +106,9 @@ def summarize_reports(report_paths):
                 / bucket["scale_gt"]["medium"]
                 if bucket["scale_gt"]["medium"] else 0.0
             ),
+            "small_gt": bucket["scale_gt"]["small"],
+            "medium_gt": bucket["scale_gt"]["medium"],
+            "large_gt": bucket["scale_gt"]["large"],
             "large_recall": (
                 float(bucket["scale_detected"]["large"])
                 / bucket["scale_gt"]["large"]
