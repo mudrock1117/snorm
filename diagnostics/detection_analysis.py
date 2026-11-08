@@ -10,6 +10,7 @@ from typing import Dict, Iterable, Mapping, Sequence, Tuple
 import numpy as np
 import torch
 
+from .gt_matching import rpn_gt_coverage
 from .internal_capture import DetectionInternalCapture
 from .tensor_metrics import high_frequency_energy, tensor_metrics
 
@@ -213,6 +214,18 @@ def run_step_sweep(
                         "roi", internal_summary.get("roi_error", "not captured")
                     )
                     internal_file = str(internal_path)
+                    if (
+                        capture.rpn_proposals_cpu is not None
+                        and len(capture.rpn_proposals_cpu) == 1
+                    ):
+                        rpn_coverage = rpn_gt_coverage(
+                            capture.rpn_proposals_cpu[0],
+                            targets[0]["boxes"],
+                        )
+                    else:
+                        rpn_coverage = {
+                            "error": "expected one RPN proposal tensor"
+                        }
                 else:
                     detection = extract_single_detection(
                         model(images, img_metas, targets, moe_mode=7)
@@ -220,6 +233,7 @@ def run_step_sweep(
                     rpn_value = "unavailable: not exposed by public eval return"
                     roi_value = "unavailable: not exposed by public eval return"
                     internal_file = None
+                    rpn_coverage = "unavailable: internal capture disabled"
             records.append(
                 {
                     "sample_id": sample_id,
@@ -228,6 +242,7 @@ def run_step_sweep(
                     "rpn_proposals": rpn_value,
                     "roi_logits": roi_value,
                     "internal_summary_file": internal_file,
+                    "rpn_gt_coverage": rpn_coverage,
                 }
             )
             _progress("sample=%s step=%d inference end" % (sample_id, int(step)))
