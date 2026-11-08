@@ -92,10 +92,31 @@ def match_step(detections, gt_boxes, gt_labels, iou_threshold, score_threshold):
     tp = len(gt_matches)
     fp = len(predictions) - tp
     fn = len(unmatched_gt)
+    labels_present = sorted(
+        set(int(value) for value in gt_labels)
+        | set(int(item["label"]) for item in predictions)
+    )
+    per_class = {}
+    for label in labels_present:
+        class_predictions = [
+            item for item in predictions if int(item["label"]) == label
+        ]
+        class_gt = [
+            index for index, value in enumerate(gt_labels) if int(value) == label
+        ]
+        class_tp = sum(1 for item in class_predictions if item["matched"])
+        per_class[str(label)] = {
+            "tp": class_tp,
+            "fp": len(class_predictions) - class_tp,
+            "fn": sum(1 for index in class_gt if index in unmatched_gt),
+            "gt_count": len(class_gt),
+            "eligible_prediction_count": len(class_predictions),
+        }
     return {
         "tp": tp,
         "fp": fp,
         "fn": fn,
+        "per_class": per_class,
         "eligible_prediction_count": len(predictions),
         "predictions": predictions,
         "gt_matches": {str(key): value for key, value in gt_matches.items()},
