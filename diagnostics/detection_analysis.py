@@ -10,6 +10,7 @@ from typing import Dict, Iterable, Mapping, Sequence, Tuple
 import numpy as np
 import torch
 
+from .internal_capture import DetectionInternalCapture
 from .tensor_metrics import high_frequency_energy, tensor_metrics
 
 
@@ -159,6 +160,8 @@ def run_step_sweep(
     sample_id: str,
     steps: Sequence[int] = (0, 1, 2, 3, 4, 5, 6),
     seed: int = 20261104,
+    capture_internals: bool = False,
+    save_internal_tensors: bool = False,
 ) -> Path:
     """Run extra detector forwards only from an explicit diagnostic entry.
 
@@ -189,17 +192,42 @@ def run_step_sweep(
                 "SNORM_STEPS": str(max(1, int(step))),
                 "SNORM_ABLATION": "norm_only" if int(step) == 0 else "full",
             }
+            capture = None
             with _temporary_environment(env), _temporary_snorm_diagnostics(model):
-                detection = extract_single_detection(
-                    model(images, img_metas, targets, moe_mode=7)
-                )
+                if capture_internals:
+                    capture = DetectionInternalCapture(
+                        model,
+                        output / "internals",
+                        step,
+                        save_tensors=save_internal_tensors,
+                    )
+                    with capture:
+                        detection = extract_single_detection(
+                            model(images, img_metas, targets, moe_mode=7)
+                        )
+                    internal_summary, internal_path = capture.save()
+                    rpn_value = internal_summary.get(
+                        "rpn", internal_summary.get("rpn_error", "not captured")
+                    )
+                    roi_value = internal_summary.get(
+                        "roi", internal_summary.get("roi_error", "not captured")
+                    )
+                    internal_file = str(internal_path)
+                else:
+                    detection = extract_single_detection(
+                        model(images, img_metas, targets, moe_mode=7)
+                    )
+                    rpn_value = "unavailable: internal capture disabled"
+                    roi_value = "unavailable: internal capture disabled"
+                    internal_file = None
             records.append(
                 {
                     "sample_id": sample_id,
                     "steps": int(step),
                     "detections": serialize_detection(detection),
-                    "rpn_proposals": "unavailable: not exposed by public eval return",
-                    "roi_logits": "unavailable: not exposed by public eval return",
+                    "rpn_proposals": rpn_value,
+                    "roi_logits": roi_value,
+                    "internal_summary_file": internal_file,
                 }
             )
             _progress("sample=%s step=%d inference end" % (sample_id, int(step)))
