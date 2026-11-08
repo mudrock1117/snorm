@@ -92,6 +92,8 @@ def main():
     parser.add_argument("--save-internal-tensors", action="store_true")
     parser.add_argument("opts", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    if args.save_internal_tensors and not args.capture_internals:
+        parser.error("--save-internal-tensors requires --capture-internals")
 
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
