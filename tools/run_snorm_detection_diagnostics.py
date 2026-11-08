@@ -17,6 +17,7 @@ from diagnostics.detection_analysis import load_sample_ids, run_step_sweep, seed
 from diagnostics.gt_matching import analyze_step_sweep, save_ground_truth
 from diagnostics.dataset_index import (
     build_subset_loader,
+    canonicalize_sample_id,
     find_dataset_indices,
     requested_ids_for_dataset,
 )
@@ -71,8 +72,13 @@ def _sample_candidates(img_meta):
     if not isinstance(info, dict):
         raise TypeError("img_meta['img_info'] must be a dictionary")
     file_name = str(info.get("file_name", info.get("id", "unknown")))
+    info_id = str(info.get("id", ""))
     return info, {
-        file_name, Path(file_name).name, Path(file_name).stem, str(info.get("id", ""))
+        file_name,
+        file_name.replace("\\", "/").rsplit("/", 1)[-1],
+        canonicalize_sample_id(file_name),
+        info_id,
+        canonicalize_sample_id(info_id),
     }
 
 
@@ -185,7 +191,9 @@ def main():
                 raise ValueError("img_metas and targets must each contain one sample")
             info, candidates = _sample_candidates(img_metas[0])
             identifier_candidates = {
-                sample_id, Path(sample_id).name, Path(sample_id).stem
+                sample_id,
+                sample_id.replace("\\", "/").rsplit("/", 1)[-1],
+                canonicalize_sample_id(sample_id),
             }
             if not candidates.intersection(identifier_candidates):
                 raise RuntimeError(
