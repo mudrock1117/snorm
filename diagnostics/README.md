@@ -207,3 +207,68 @@ ID 中含 `fog` 时不会扫描 Night dataset；含 `night` 时不会扫描 Fog 
 6. 提交后在新 checkout 验证模块可导入，再移除服务器临时软链接。
 
 在完成来源核验前，不应把软链接目标或未经审查的整个目录直接上传 GitHub。
+
+
+## 单样本 GT 匹配
+
+诊断入口现在保存 resize 后检测坐标系的 `ground_truth.json`，并自动输出：
+
+- `gt_step_analysis.json`：每步 TP/FP/FN、逐类别统计、预测匹配明细、未匹配 GT；
+- `gt_step_changes.csv`：同一 GT 在不同 Step 的 detected/score/IoU；
+- `gt_step_summary.txt`：便于快速阅读的变化摘要。
+
+匹配规则：预测按 score 降序，仅与相同类别的尚未匹配 GT 计算 IoU；IoU 达到阈值后进行一对一匹配。默认 score 阈值为 0，IoU 阈值为 0.5，可通过下列参数修改：
+
+```bash
+--match-score-threshold 0.5 --match-iou-threshold 0.5
+```
+
+这些 TP/FP/FN 只描述一个 resize 后固定样本，不是完整数据集 VOC mAP，不能与历史 Fog/Night mAP 混用。
+
+对已经保存了 `ground_truth.json` 的旧 sweep 可离线重算：
+
+```bash
+python tools/analyze_snorm_step_gt.py \
+  --sweep-json /path/sample_step_sweep.json \
+  --ground-truth-json /path/ground_truth.json \
+  --output-dir /path/offline_gt_analysis \
+  --iou-threshold 0.5 \
+  --score-threshold 0.5
+```
+
+## 可选 RPN/ROI 内部采集
+
+默认关闭。启用只读临时 hook：
+
+```bash
+--capture-internals
+```
+
+每个 Step 独立生成：
+
+```text
+internals/step00_internal.json
+internals/step01_internal.json
+internals/step06_internal.json
+```
+
+字段：
+
+- `rpn.proposal_counts`：NMS 后 proposal 数；
+- `rpn.proposals`：每张图 proposals 的 shape/dtype/min/max/mean/std；
+- `rpn.objectness_logits`：RPN anchor objectness logits 统计；
+- `rpn.decoded_bbox_map`：RPN 解码框图统计；
+- `roi.class_logits`：进入 ROI 后处理前的类别 logits；
+- `roi.box_regression`：ROI box regression 输出统计；
+- `roi.roi_features/box_features`：ROI pooling 和 predictor 特征统计；
+- `module/field`：字段所属真实模块和 forward 输出位置。
+
+如确需原始 CPU tensor，额外指定：
+
+```bash
+--capture-internals --save-internal-tensors
+```
+
+这会生成 `stepNN_internal.pt`，可能占用较大内存和磁盘。proposals 数量和 ROI 行在每个 Step 都会因 RPN/NMS 独立变化，不允许按数组索引跨 Step 对齐。跨 Step 对比应使用 GT/class/IoU 或空间匹配。
+
+hook 仅注册到 `teacher.rpn_norm` 与 `teacher.box_head_norm`，forward 结束立即移除，不修改返回值。若服务器实际模块输出结构不是 RPN 4 项或 BoxHead 9 项，JSON 会记录 `rpn_error/roi_error`，而不是伪造数据。
