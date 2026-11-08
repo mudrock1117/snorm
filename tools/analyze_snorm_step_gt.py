@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--sample-id", default=None)
     parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument("--score-threshold", type=float, default=0.0)
+    parser.add_argument("--rpn-fn-iou-threshold", type=float, default=0.5)
     args = parser.parse_args()
 
     sweep_path = Path(args.sweep_json)
@@ -37,6 +38,7 @@ def main():
         sample_id,
         iou_threshold=args.iou_threshold,
         score_threshold=args.score_threshold,
+        rpn_fn_iou_threshold=args.rpn_fn_iou_threshold,
     )
     print("single-sample analysis only; NOT VOC mAP")
     print("json:", json_path)
