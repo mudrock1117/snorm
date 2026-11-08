@@ -32,7 +32,7 @@ def _clone_cpu(value):
 class DetectionInternalCapture(object):
     """Capture one forward pass and remove hooks immediately afterwards."""
 
-    def __init__(self, model, output_dir, step, save_tensors=True):
+    def __init__(self, model, output_dir, step, save_tensors=False):
         self.model = model.module if hasattr(model, "module") else model
         self.output_dir = Path(output_dir)
         self.step = int(step)
@@ -66,9 +66,10 @@ class DetectionInternalCapture(object):
                 decoded_bbox_map, "teacher.rpn_norm", "decoded_bbox_map"
             ),
         }
-        self.raw["rpn_proposals"] = [_clone_cpu(item) for item in proposals]
-        self.raw["rpn_objectness_logits"] = _clone_cpu(objectness_logits)
-        self.raw["rpn_decoded_bbox_map"] = _clone_cpu(decoded_bbox_map)
+        if self.save_tensors:
+            self.raw["rpn_proposals"] = [_clone_cpu(item) for item in proposals]
+            self.raw["rpn_objectness_logits"] = _clone_cpu(objectness_logits)
+            self.raw["rpn_decoded_bbox_map"] = _clone_cpu(decoded_bbox_map)
 
     def _roi_hook(self, module, inputs, output):
         if not isinstance(output, (list, tuple)) or len(output) != 9:
@@ -95,9 +96,10 @@ class DetectionInternalCapture(object):
                 box_features, "teacher.box_head_norm", "box_features"
             ),
         }
-        self.raw["roi_class_logits"] = _clone_cpu(class_logits)
-        self.raw["roi_box_regression"] = _clone_cpu(box_regression)
-        self.raw["roi_proposals"] = [_clone_cpu(item) for item in proposals]
+        if self.save_tensors:
+            self.raw["roi_class_logits"] = _clone_cpu(class_logits)
+            self.raw["roi_box_regression"] = _clone_cpu(box_regression)
+            self.raw["roi_proposals"] = [_clone_cpu(item) for item in proposals]
 
     def __enter__(self):
         teacher = getattr(self.model, "teacher", None)
