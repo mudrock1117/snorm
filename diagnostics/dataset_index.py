@@ -52,7 +52,7 @@ def _add_value(candidates, value):
     if isinstance(value, (str, int)):
         text = str(value)
         candidates.add(text)
-        file_name = text.replace("\\\\", "/").rsplit("/", 1)[-1]
+        file_name = text.replace("\\", "/").rsplit("/", 1)[-1]
         candidates.add(file_name)
         candidates.add(canonicalize_sample_id(file_name))
 
