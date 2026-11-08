@@ -44,3 +44,14 @@
 - Path(file_name).stem 同时用于索引匹配和变换后 img_meta 二次校验。
 - 确认历史 .gitignore 的 datasets/ 误伤 detection/data/datasets；已改为 /datasets/，源码包仍待服务器来源核验后单独归档。
 - 未执行数据加载、推理或测试，待服务器 GPU1 单样本验证。
+
+
+## 2026-11-08 检测器内部与 GT 诊断
+
+- 新增单样本、同类别、一对一 IoU 匹配，输出逐 Step TP/FP/FN、逐类别统计和逐 GT score/IoU 变化。
+- 明确单样本 TP/FP/FN 不等于 VOC mAP。
+- 新增离线 sweep JSON + ground_truth.json 重分析入口。
+- 确认 RPN forward 返回 4 项、BoxHead forward 返回 9 项；可通过临时 hook 采集 proposals、objectness logits、ROI class logits 与特征统计。
+- 内部 hook 默认关闭，每 Step 独立保存并立即移除；原始 tensor 保存另设开关。
+- 禁止按数组索引跨 Step 比较 proposals/ROI rows，需使用 GT/class/IoU 或空间匹配。
+- 未运行服务器 GPU 测试，待固定 Fog 样本验证。
