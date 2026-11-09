@@ -4,6 +4,22 @@ import json
 from pathlib import Path
 
 
+SIZES = ("small", "medium", "large")
+THRESHOLDS = ("0.3", "0.5", "0.7")
+
+
+def _empty_size():
+    return {
+        "gt": 0,
+        "tp": 0,
+        "fn": 0,
+        "rpn_covered": {key: 0 for key in THRESHOLDS},
+        "rpn_gt": {key: 0 for key in THRESHOLDS},
+        "rpn_uncovered": 0,
+        "rpn_covered_detection_failure": 0,
+    }
+
+
 def _empty_bucket():
     return {
         "samples": set(),
@@ -11,13 +27,16 @@ def _empty_bucket():
         "tp": 0,
         "fp": 0,
         "fn": 0,
-        "rpn_covered": {"0.3": 0, "0.5": 0, "0.7": 0},
-        "rpn_gt": {"0.3": 0, "0.5": 0, "0.7": 0},
-        "scale_detected": {"small": 0, "medium": 0, "large": 0},
-        "scale_gt": {"small": 0, "medium": 0, "large": 0},
+        "rpn_covered": {key: 0 for key in THRESHOLDS},
+        "rpn_gt": {key: 0 for key in THRESHOLDS},
         "rpn_uncovered_fn": 0,
         "rpn_covered_detection_failure_fn": 0,
+        "size": {size: _empty_size() for size in SIZES},
     }
+
+
+def _ratio(value, total):
+    return float(value) / total if total else 0.0
 
 
 def summarize_reports(report_paths):
@@ -35,8 +54,7 @@ def summarize_reports(report_paths):
         for step_result in report.get("steps", []):
             step = int(step_result["step"])
             for group in (domain, "overall"):
-                key = (group, step)
-                bucket = buckets.setdefault(key, _empty_bucket())
+                bucket = buckets.setdefault((group, step), _empty_bucket())
                 bucket["samples"].add("%s/%s" % (domain, sample_id))
                 bucket["gt"] += int(report.get("gt_count", 0))
                 bucket["tp"] += int(step_result["tp"])
@@ -44,7 +62,7 @@ def summarize_reports(report_paths):
                 bucket["fn"] += int(step_result["fn"])
                 coverage = step_result.get("rpn_gt_coverage")
                 if isinstance(coverage, dict):
-                    for threshold in ("0.3", "0.5", "0.7"):
+                    for threshold in THRESHOLDS:
                         values = coverage.get("thresholds", {}).get(threshold)
                         if values:
                             bucket["rpn_covered"][threshold] += int(values["covered"])
@@ -56,18 +74,33 @@ def summarize_reports(report_paths):
                 bucket["rpn_covered_detection_failure_fn"] += int(
                     sources.get("rpn_covered_detection_failure", 0)
                 )
+
                 for item in per_gt:
-                    scale = item.get("scale")
+                    size = item.get("scale")
+                    if size not in SIZES:
+                        continue
                     status = item.get("steps", {}).get(str(step), {})
-                    if scale in bucket["scale_gt"]:
-                        bucket["scale_gt"][scale] += 1
-                        if status.get("detected"):
-                            bucket["scale_detected"][scale] += 1
+                    size_bucket = bucket["size"][size]
+                    size_bucket["gt"] += 1
+                    detected = bool(status.get("detected"))
+                    if detected:
+                        size_bucket["tp"] += 1
+                    else:
+                        size_bucket["fn"] += 1
+                        source = status.get("fn_source")
+                        if source in (
+                                "rpn_uncovered",
+                                "rpn_covered_detection_failure"):
+                            size_bucket[source] += 1
+                    best_iou = status.get("rpn_best_iou")
+                    if best_iou is not None:
+                        for threshold in THRESHOLDS:
+                            size_bucket["rpn_gt"][threshold] += 1
+                            if float(best_iou) >= float(threshold):
+                                size_bucket["rpn_covered"][threshold] += 1
 
     rows = []
     for (group, step), bucket in sorted(buckets.items()):
-        precision_denominator = bucket["tp"] + bucket["fp"]
-        recall_denominator = bucket["tp"] + bucket["fn"]
         row = {
             "group": group,
             "step": step,
@@ -76,49 +109,38 @@ def summarize_reports(report_paths):
             "tp": bucket["tp"],
             "fp": bucket["fp"],
             "fn": bucket["fn"],
-            "precision": (
-                float(bucket["tp"]) / precision_denominator
-                if precision_denominator else 0.0
-            ),
-            "recall": (
-                float(bucket["tp"]) / recall_denominator
-                if recall_denominator else 0.0
-            ),
-            "rpn_recall_0.3": (
-                float(bucket["rpn_covered"]["0.3"]) / bucket["rpn_gt"]["0.3"]
-                if bucket["rpn_gt"]["0.3"] else 0.0
-            ),
-            "rpn_recall_0.5": (
-                float(bucket["rpn_covered"]["0.5"]) / bucket["rpn_gt"]["0.5"]
-                if bucket["rpn_gt"]["0.5"] else 0.0
-            ),
-            "rpn_recall_0.7": (
-                float(bucket["rpn_covered"]["0.7"]) / bucket["rpn_gt"]["0.7"]
-                if bucket["rpn_gt"]["0.7"] else 0.0
-            ),
-            "small_recall": (
-                float(bucket["scale_detected"]["small"])
-                / bucket["scale_gt"]["small"]
-                if bucket["scale_gt"]["small"] else 0.0
-            ),
-            "medium_recall": (
-                float(bucket["scale_detected"]["medium"])
-                / bucket["scale_gt"]["medium"]
-                if bucket["scale_gt"]["medium"] else 0.0
-            ),
-            "small_gt": bucket["scale_gt"]["small"],
-            "medium_gt": bucket["scale_gt"]["medium"],
-            "large_gt": bucket["scale_gt"]["large"],
-            "large_recall": (
-                float(bucket["scale_detected"]["large"])
-                / bucket["scale_gt"]["large"]
-                if bucket["scale_gt"]["large"] else 0.0
-            ),
+            "precision": _ratio(bucket["tp"], bucket["tp"] + bucket["fp"]),
+            "recall": _ratio(bucket["tp"], bucket["tp"] + bucket["fn"]),
             "rpn_uncovered_fn": bucket["rpn_uncovered_fn"],
             "rpn_covered_detection_failure_fn": (
                 bucket["rpn_covered_detection_failure_fn"]
             ),
         }
+        for threshold in THRESHOLDS:
+            row["rpn_recall_%s" % threshold] = _ratio(
+                bucket["rpn_covered"][threshold],
+                bucket["rpn_gt"][threshold],
+            )
+        for size in SIZES:
+            values = bucket["size"][size]
+            prefix = size + "_"
+            row[prefix + "gt"] = values["gt"]
+            row[prefix + "tp"] = values["tp"]
+            row[prefix + "fn"] = values["fn"]
+            row[prefix + "recall"] = _ratio(values["tp"], values["gt"])
+            row[prefix + "rpn_uncovered"] = values["rpn_uncovered"]
+            row[prefix + "rpn_covered_detection_failure"] = values[
+                "rpn_covered_detection_failure"
+            ]
+            for threshold in THRESHOLDS:
+                row[prefix + "rpn_recall_%s" % threshold] = _ratio(
+                    values["rpn_covered"][threshold],
+                    values["rpn_gt"][threshold],
+                )
+        if row["tp"] + row["fn"] != row["gt"]:
+            raise RuntimeError("batch summary violates TP + FN = GT")
+        if sum(row[size + "_fn"] for size in SIZES) != row["fn"]:
+            raise RuntimeError("batch summary size FN does not equal total FN")
         rows.append(row)
     return rows, sample_manifests
 
@@ -135,6 +157,9 @@ def write_batch_summary(report_root, output_dir):
     payload = {
         "analysis_scope": (
             "fixed-sample diagnostic aggregate only; NOT full-dataset VOC mAP"
+        ),
+        "size_definition": (
+            "unchanged existing diagnostic definition in resized detector coordinates"
         ),
         "report_count": len(report_paths),
         "samples": samples,
@@ -158,22 +183,36 @@ def write_batch_summary(report_root, output_dir):
         "reports=%d" % len(report_paths),
     ]
     for row in rows:
+        lines.append("")
         lines.append(
-            (
-                "%s step=%d samples=%d GT=%d TP=%d FP=%d FN=%d "
-                "P=%.4f R=%.4f RPN@.3/.5/.7=%.4f/%.4f/%.4f "
-                "small/medium/large=%.4f/%.4f/%.4f "
-                "FN(rpn/det)=%d/%d"
-            )
+            "%s step=%d samples=%d GT=%d TP=%d FP=%d FN=%d P=%.4f R=%.4f"
             % (
                 row["group"], row["step"], row["samples"], row["gt"],
-                row["tp"], row["fp"], row["fn"], row["precision"],
-                row["recall"], row["rpn_recall_0.3"],
-                row["rpn_recall_0.5"], row["rpn_recall_0.7"],
-                row["small_recall"], row["medium_recall"],
-                row["large_recall"], row["rpn_uncovered_fn"],
+                row["tp"], row["fp"], row["fn"], row["precision"], row["recall"],
+            )
+        )
+        lines.append(
+            "  RPN Recall@0.3/0.5/0.7=%.4f/%.4f/%.4f FN(rpn/det)=%d/%d"
+            % (
+                row["rpn_recall_0.3"], row["rpn_recall_0.5"],
+                row["rpn_recall_0.7"], row["rpn_uncovered_fn"],
                 row["rpn_covered_detection_failure_fn"],
             )
         )
+        for size in SIZES:
+            prefix = size + "_"
+            lines.append(
+                "  %s: GT=%d TP=%d FN=%d Recall=%.4f "
+                "RPN@0.3/0.5/0.7=%.4f/%.4f/%.4f FN(rpn/det)=%d/%d"
+                % (
+                    size, row[prefix + "gt"], row[prefix + "tp"],
+                    row[prefix + "fn"], row[prefix + "recall"],
+                    row[prefix + "rpn_recall_0.3"],
+                    row[prefix + "rpn_recall_0.5"],
+                    row[prefix + "rpn_recall_0.7"],
+                    row[prefix + "rpn_uncovered"],
+                    row[prefix + "rpn_covered_detection_failure"],
+                )
+            )
     text_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return json_path, csv_path, text_path
