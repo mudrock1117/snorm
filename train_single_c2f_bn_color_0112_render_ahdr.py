@@ -385,7 +385,7 @@ def main(det_cfg, args):
     print('target/test datasets =', list(det_cfg.DATASETS.TESTS))
     print('checkpoint =', _load_path if _load_path else '<none>')
     print('checkpoint initialization mode =', (
-        'AUDITED_E2_TO_A_EXPANSION' if _is_small_anchor_a and _load_path
+        'AUDITED_SMALL_ANCHOR_COMPAT' if _is_small_anchor_a and _load_path
         else 'STANDARD_EXACT_LOAD' if _load_path else 'RANDOM_INITIALIZATION'
     ))
     if _load_path:
