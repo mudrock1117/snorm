@@ -78,6 +78,12 @@ def _new_transition_bucket():
         "rpn_persistent_covered": 0,
         "recovered_by_size": {size: 0 for size in SIZES},
         "degraded_by_size": {size: 0 for size in SIZES},
+        "recovered_from_rpn_uncovered": 0,
+        "recovered_from_downstream_failure": 0,
+        "degraded_to_rpn_uncovered": 0,
+        "degraded_to_downstream_failure": 0,
+        "new_fp_by_type": {name: 0 for name in FP_TYPES},
+        "resolved_fp_by_type": {name: 0 for name in FP_TYPES},
     }
 
 
@@ -161,6 +167,7 @@ def _analyze_report(report, path, step_buckets, transition_buckets,
     if len(gt_items) != gt_count:
         raise RuntimeError("%s per_gt count does not equal gt_count" % path)
     steps = _step_map(report, path)
+    fp_records_by_step = {}
 
     for step in STEPS:
         result = steps[step]
@@ -185,6 +192,7 @@ def _analyze_report(report, path, step_buckets, transition_buckets,
 
         fp_counts = {name: 0 for name in FP_TYPES}
         fp_by_class = defaultdict(lambda: {name: 0 for name in FP_TYPES})
+        fp_records = []
         matched_gt = set(int(key) for key in result.get("gt_matches", {}).keys())
         for prediction in result.get("predictions", []):
             if prediction.get("matched"):
@@ -195,6 +203,13 @@ def _analyze_report(report, path, step_buckets, transition_buckets,
             )
             fp_counts[fp_type] += 1
             fp_by_class[str(int(prediction["label"]))][fp_type] += 1
+            fp_records.append({
+                "type": fp_type,
+                "label": int(prediction["label"]),
+                "box": prediction["box"],
+                "score": float(prediction["score"]),
+            })
+        fp_records_by_step[step] = fp_records
         if sum(fp_counts.values()) != fp:
             raise RuntimeError(
                 "%s step=%d violates sum(FP types) = FP (%d != %d)"
@@ -282,11 +297,43 @@ def _analyze_report(report, path, step_buckets, transition_buckets,
                     target["covered"] += int(scale_values["covered"])
                     target["gt"] += int(scale_values["gt_count"])
 
+    # Compare final prediction FPs by class and spatial IoU, never by array index.
+    # A Step6 FP is "new" when no unused Step0 FP of the same predicted class
+    # overlaps it at IoU>=0.5. The reverse defines resolved Step0 FPs.
+    step0_fps = fp_records_by_step[0]
+    step6_fps = fp_records_by_step[6]
+    used_step0 = set()
+    matched_step6 = set()
+    for step6_index, current in enumerate(step6_fps):
+        candidates = []
+        for step0_index, previous in enumerate(step0_fps):
+            if step0_index in used_step0 or previous["label"] != current["label"]:
+                continue
+            overlap = box_iou(previous["box"], current["box"])
+            if overlap >= 0.5:
+                candidates.append((overlap, step0_index))
+        if candidates:
+            _, step0_index = max(candidates)
+            used_step0.add(step0_index)
+            matched_step6.add(step6_index)
+    new_fp_types = {name: 0 for name in FP_TYPES}
+    resolved_fp_types = {name: 0 for name in FP_TYPES}
+    for index, item in enumerate(step6_fps):
+        if index not in matched_step6:
+            new_fp_types[item["type"]] += 1
+    for index, item in enumerate(step0_fps):
+        if index not in used_step0:
+            resolved_fp_types[item["type"]] += 1
+
     for from_step, to_step in PAIRS:
         for group in (domain, "Overall"):
             bucket = transition_buckets[(group, from_step, to_step)]
             bucket["samples"].add("%s/%s" % (domain, sample_id))
             bucket["gt"] += gt_count
+            if from_step == 0 and to_step == 6:
+                for name in FP_TYPES:
+                    bucket["new_fp_by_type"][name] += new_fp_types[name]
+                    bucket["resolved_fp_by_type"][name] += resolved_fp_types[name]
         for gt in gt_items:
             size = gt["scale"]
             before = _status(gt, from_step, path)
@@ -302,9 +349,17 @@ def _analyze_report(report, path, step_buckets, transition_buckets,
                 elif not before_tp and after_tp:
                     bucket["recovered_fn_to_tp"] += 1
                     bucket["recovered_by_size"][size] += 1
+                    if before_covered:
+                        bucket["recovered_from_downstream_failure"] += 1
+                    else:
+                        bucket["recovered_from_rpn_uncovered"] += 1
                 elif before_tp and not after_tp:
                     bucket["degraded_tp_to_fn"] += 1
                     bucket["degraded_by_size"][size] += 1
+                    if after_covered:
+                        bucket["degraded_to_downstream_failure"] += 1
+                    else:
+                        bucket["degraded_to_rpn_uncovered"] += 1
                 else:
                     bucket["persistent_fn"] += 1
 
@@ -486,6 +541,10 @@ def _diagnosis(group, step, transition):
             "degraded_gt": transition["degraded_tp_to_fn"],
             "step6_fp_total_delta": transition["fp_total_delta"],
             "step6_fp_type_delta": transition["fp_type_delta"],
+            "new_step6_fp_by_type": transition["new_fp_by_type"],
+            "resolved_step0_fp_by_type": transition["resolved_fp_by_type"],
+            "recovered_from_rpn_uncovered": transition["recovered_from_rpn_uncovered"],
+            "recovered_from_downstream_failure": transition["recovered_from_downstream_failure"],
             "effectiveness": transition["effectiveness"],
         },
         "root_cause_ranking": ranking,
@@ -561,6 +620,10 @@ def analyze_root_cause(report_root, output_dir,
             "duplicate (same-class matched GT) > classification "
             "(different-class IoU>=0.5) > localization "
             "(max IoU in [0.3,0.5)) > background (max IoU<0.3)"
+        ),
+        "step0_step6_fp_identity_rule": (
+            "class-equal greedy spatial matching at prediction IoU>=0.5; "
+            "never array-index matching"
         ),
         "samples": sample_manifest,
         "steps": steps,
@@ -659,10 +722,12 @@ def analyze_root_cause(report_root, output_dir,
                 transition["recovered_gt"], transition["degraded_gt"],
                 transition["effectiveness"],
             ),
-            "Step6 FP delta=%d; type delta=%s"
+            "Step6 FP delta=%d; type delta=%s; new=%s; resolved=%s"
             % (
                 transition["step6_fp_total_delta"],
                 transition["step6_fp_type_delta"],
+                transition["new_step6_fp_by_type"],
+                transition["resolved_step0_fp_by_type"],
             ),
             "Root-cause ranking: %s" % item["root_cause_ranking"],
             "",
