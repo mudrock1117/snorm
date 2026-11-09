@@ -316,3 +316,16 @@ column -s, -t /home/ubuntu/hdx/diag_fog30_night30/summary/batch_summary.csv | le
 ```
 
 输出包括 Fog、Night 与 overall 的 GT/TP/FP/FN、Precision/Recall、RPN Recall、尺度 Recall 和两类 FN 数量，并在 JSON 中保存实际 sample IDs。所有结果只是固定样本诊断汇总，**不是 VOC mAP**。抽样器用索引分层保证覆盖测试集范围，不能在推理前保证 GT 数量/尺度严格平衡；实际分布由汇总中的 GT 与尺度计数核验。
+
+
+## 最终离线 root-cause 报告
+
+已有 Fog30/Night30 的 `gt_step_analysis.json` 和 RPN coverage 时，不需要重新运行 detector：
+
+```bash
+python tools/analyze_snorm_root_cause.py \
+  --report-root /home/ubuntu/hdx/diag_fog30_night30/reports \
+  --output-dir /home/ubuntu/hdx/diag_fog30_night30/root_cause
+```
+
+该命令只读取现有 JSON，输出 `diagnostic_root_cause.txt/json/csv`。FP 使用互斥优先级：duplicate > classification > localization > background。Step0/Step6 FP 身份通过同类别且预测框 IoU>=0.5 的贪心空间匹配建立，不使用 proposal、ROI 或预测数组索引。运行时强制检查 `TP+FN=GT`、四类 FP 之和等于 FP、FN 的尺度/阶段之和等于 FN。结果是固定样本诊断，不是 VOC mAP。
