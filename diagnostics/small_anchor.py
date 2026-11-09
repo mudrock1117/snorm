@@ -33,7 +33,7 @@ def anchor_channel_index(scale_index, ratio_index, scale_count):
 
 def _copy_anchor_channels(old_tensor, new_tensor, old_sizes, new_sizes,
                           ratio_count, bbox):
-    result = new_tensor.clone()
+    result = new_tensor.detach().cpu().clone()
     copied = []
     for ratio_index in range(int(ratio_count)):
         for old_scale_index, size in enumerate(old_sizes):
@@ -173,10 +173,12 @@ def load_small_anchor_checkpoint(
     if getattr(incompatible, "unexpected_keys", None):
         raise RuntimeError("adapted state unexpectedly has unexpected keys")
 
-    initialized_per_ratio = [
-        anchor_channel_index(0, ratio_index, len(new_sizes))
-        for ratio_index in range(len(ratios))
-    ]
+    initialized_per_ratio = []
+    if expanded_parameters:
+        initialized_per_ratio = [
+            anchor_channel_index(0, ratio_index, len(new_sizes))
+            for ratio_index in range(len(ratios))
+        ]
     print("[SMALL-ANCHOR LOAD]")
     print("checkpoint_state_source =", source)
     print("old anchors =", old_sizes)
@@ -187,7 +189,10 @@ def load_small_anchor_checkpoint(
         item["key"] for item in expanded_parameters
     ])
     print("newly initialized channels =", initialized_per_ratio)
-    print("new channel init = existing RPN normal std=0.01, bias=0")
+    print("new channel init =", (
+        "existing RPN normal std=0.01, bias=0"
+        if expanded_parameters else "not applicable (checkpoint shapes already match)"
+    ))
     print("missing_keys =", missing)
     print("unexpected_keys =", unexpected)
     return {
