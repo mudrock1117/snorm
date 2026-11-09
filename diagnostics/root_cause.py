@@ -495,20 +495,31 @@ def _diagnosis(group, step, transition):
         values["rpn_covered_detection_failure"]
         for values in step["size"].values()
     )
-    evidence = []
-    if downstream > uncovered:
-        evidence.append(("ROI/downstream detection", downstream))
-    if uncovered:
-        evidence.append(("RPN coverage", uncovered))
-    if transition["effectiveness"] != "beneficial":
-        evidence.append((
-            "AHDR/render iteration",
-            abs(transition["total_detection_error_delta"])
-            + transition["degraded_tp_to_fn"],
-        ))
-    if downstream and uncovered:
-        evidence.append(("combined RPN + ROI", downstream + uncovered))
+    stage_total = downstream + uncovered
+    downstream_share = _ratio(downstream, stage_total)
+    uncovered_share = _ratio(uncovered, stage_total)
+    render_score = (
+        max(0, transition["total_detection_error_delta"])
+        + transition["degraded_tp_to_fn"]
+    )
+    evidence = [
+        ("ROI/downstream detection", downstream),
+        ("RPN coverage", uncovered),
+        ("AHDR/render iteration", render_score),
+    ]
     evidence.sort(key=lambda item: item[1], reverse=True)
+    if transition["effectiveness"] == "harmful" and stage_total:
+        supported_direction = "combined AHDR + %s" % (
+            "ROI" if downstream >= uncovered else "RPN"
+        )
+    elif downstream_share >= 0.6:
+        supported_direction = "ROI/downstream detection"
+    elif uncovered_share >= 0.6:
+        supported_direction = "RPN coverage"
+    elif stage_total:
+        supported_direction = "combined RPN + ROI"
+    else:
+        supported_direction = "AHDR/local enhancement diagnosis"
     ranking = [
         {"rank": index + 1, "candidate": name, "evidence_count": count}
         for index, (name, count) in enumerate(evidence)
@@ -548,6 +559,7 @@ def _diagnosis(group, step, transition):
             "effectiveness": transition["effectiveness"],
         },
         "root_cause_ranking": ranking,
+        "evidence_supported_direction": supported_direction,
         "recommendation_scope": (
             "Evidence ranking only. No model change or VOC-mAP claim is made."
         ),
@@ -606,6 +618,24 @@ def analyze_root_cause(report_root, output_dir,
         )
         for group in groups
     ]
+    fog_diagnosis = diagnosis[0]
+    night_diagnosis = diagnosis[1]
+    fog_night_comparison = {
+        "same_fn_stage_driver": (
+            fog_diagnosis["fn_stage_driver"]
+            == night_diagnosis["fn_stage_driver"]
+        ),
+        "fog_fn_stage_driver": fog_diagnosis["fn_stage_driver"],
+        "night_fn_stage_driver": night_diagnosis["fn_stage_driver"],
+        "same_dominant_fp_type": (
+            fog_diagnosis["dominant_fp_type"]
+            == night_diagnosis["dominant_fp_type"]
+        ),
+        "fog_dominant_fp_type": fog_diagnosis["dominant_fp_type"],
+        "night_dominant_fp_type": night_diagnosis["dominant_fp_type"],
+        "fog_supported_direction": fog_diagnosis["evidence_supported_direction"],
+        "night_supported_direction": night_diagnosis["evidence_supported_direction"],
+    }
     payload = {
         "analysis_scope": (
             "fixed-sample offline diagnostic only; NOT full-dataset VOC mAP"
@@ -629,6 +659,7 @@ def analyze_root_cause(report_root, output_dir,
         "steps": steps,
         "transitions": transitions,
         "diagnosis": diagnosis,
+        "fog_night_comparison": fog_night_comparison,
     }
 
     output = Path(output_dir)
@@ -683,11 +714,23 @@ def analyze_root_cause(report_root, output_dir,
             "persistent_fn", "rpn_uncovered_to_covered",
             "rpn_covered_to_uncovered", "fp_total_delta",
             "total_detection_error_delta",
+            "recovered_from_rpn_uncovered",
+            "recovered_from_downstream_failure",
+            "degraded_to_rpn_uncovered",
+            "degraded_to_downstream_failure",
         ):
             rows.append(dict(base, metric=metric, value=item[metric]))
         for fp_type, value in item["fp_type_delta"].items():
             rows.append(dict(
                 base, metric="fp_type_delta", fp_type=fp_type, value=value
+            ))
+        for fp_type, value in item["new_fp_by_type"].items():
+            rows.append(dict(
+                base, metric="new_step6_fp", fp_type=fp_type, value=value
+            ))
+        for fp_type, value in item["resolved_fp_by_type"].items():
+            rows.append(dict(
+                base, metric="resolved_step0_fp", fp_type=fp_type, value=value
             ))
 
     fields = [
@@ -729,8 +772,15 @@ def analyze_root_cause(report_root, output_dir,
                 transition["new_step6_fp_by_type"],
                 transition["resolved_step0_fp_by_type"],
             ),
+            "Evidence-supported direction: %s"
+            % item["evidence_supported_direction"],
             "Root-cause ranking: %s" % item["root_cause_ranking"],
             "",
         ])
+    lines.extend([
+        "[Fog vs Night]",
+        str(fog_night_comparison),
+        "",
+    ])
     txt_path.write_text("\n".join(lines), encoding="utf-8")
     return json_path, csv_path, txt_path
