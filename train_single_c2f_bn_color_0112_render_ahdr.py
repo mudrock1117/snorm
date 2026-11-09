@@ -6,6 +6,7 @@ import time
 import copy
 import random
 import signal
+import subprocess
 import numpy as np
 
 # CUDA预初始化：在任何其他导入之前初始化CUDA，防止tensorflow导入失败污染CUDA上下文
@@ -27,6 +28,7 @@ from detection.data.build import build_data_loaders
 from detection.engine.eval import evaluation
 from detection.modeling.build import build_detectors
 from detection.utils import dist_utils
+from diagnostics.small_anchor import load_small_anchor_checkpoint
 
 #from saver_domain import Saver
 import torch.nn.functional as F
@@ -365,16 +367,45 @@ def main(det_cfg, args):
     current_epoch = -1
     _default_pretrain = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'best.pth')
     _load_path = args.resume if args.resume else (_default_pretrain if os.path.exists(_default_pretrain) else '')
+    _anchor_sizes = tuple(int(v) for v in det_cfg.MODEL.RPN.ANCHOR_SIZES)
+    _aspect_ratios = tuple(float(v) for v in det_cfg.MODEL.RPN.ASPECT_RATIOS)
+    _is_small_anchor_a = _anchor_sizes == (32, 64, 128, 256, 512)
+    try:
+        _git_sha = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], stderr=subprocess.STDOUT
+        ).decode('utf-8').strip()
+    except Exception:
+        _git_sha = 'unavailable'
+    print('[EXPERIMENT START]')
+    print('experiment =', 'A_SMALLANCHOR' if _is_small_anchor_a else os.environ.get('SNORM_EXPERIMENT', 'E0'))
+    print('git SHA =', _git_sha)
+    print('anchor sizes =', _anchor_sizes)
+    print('number of anchors =', len(_anchor_sizes) * len(_aspect_ratios))
+    print('source train dataset =', list(det_cfg.DATASETS.TRAINS))
+    print('target/test datasets =', list(det_cfg.DATASETS.TESTS))
+    print('checkpoint =', _load_path if _load_path else '<none>')
+    print('checkpoint initialization mode =', (
+        'AUDITED_E2_TO_A_EXPANSION' if _is_small_anchor_a and _load_path
+        else 'STANDARD_EXACT_LOAD' if _load_path else 'RANDOM_INITIALIZATION'
+    ))
     if _load_path:
         print('Loading checkpoint from {} ...'.format(_load_path))
-        checkpoint = torch.load(_load_path, map_location='cpu')
-        _state = checkpoint['model'] if 'model' in checkpoint else checkpoint
-        model_without_ddp.load_state_dict(_state, strict=False)
-        print('✅ 成功加载权重参数')
+        if _is_small_anchor_a:
+            _load_result = load_small_anchor_checkpoint(
+                model_without_ddp, _load_path,
+                old_anchor_sizes=(64, 128, 256, 512),
+                new_anchor_sizes=_anchor_sizes,
+            )
+            checkpoint = _load_result['checkpoint']
+        else:
+            checkpoint = torch.load(_load_path, map_location='cpu')
+            _state = checkpoint['model'] if 'model' in checkpoint else checkpoint
+            model_without_ddp.load_state_dict(_state, strict=False)
+        print('checkpoint load completed')
         if 'current_epoch' in checkpoint and args.use_current_epoch:
             current_epoch = int(checkpoint['current_epoch'])
     else:
-        print('⚠️ 未找到预训练权重，使用随机初始化！')
+        print('WARNING: no pretrained checkpoint; using random initialization')
     
     work_dir = det_cfg.WORK_DIR
     _exp_wd = os.environ.get('SNORM_EXPERIMENT', 'E0')
@@ -454,6 +485,15 @@ def main(det_cfg, args):
                       model_paramters += [{'params': _rn.parameters(), 'lr': _base_lr}]
                       model_paramters += [{'params': _dis.parameters(), 'lr': _base_lr}]
               print('  [SNORM_EXPERIMENT] active =', _exp)
+          if _is_small_anchor_a:
+              print('[A_SMALLANCHOR TRAINABLE GROUPS]')
+              for _group_index, _group in enumerate(model_paramters):
+                  _group_params = list(_group['params'])
+                  _group['params'] = _group_params
+                  print('group={} lr={} trainable_params={}'.format(
+                      _group_index, _group.get('lr', det_cfg.SOLVER.LR),
+                      sum(p.numel() for p in _group_params if p.requires_grad)
+                  ))
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
           _total_epochs = det_cfg.SOLVER.EPOCHS
           _t_max = max(1, _total_epochs * len(train_loader))
