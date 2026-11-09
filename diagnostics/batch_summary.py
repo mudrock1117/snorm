@@ -141,6 +141,21 @@ def summarize_reports(report_paths):
             raise RuntimeError("batch summary violates TP + FN = GT")
         if sum(row[size + "_fn"] for size in SIZES) != row["fn"]:
             raise RuntimeError("batch summary size FN does not equal total FN")
+        for size in SIZES:
+            if (
+                row[size + "_rpn_uncovered"]
+                + row[size + "_rpn_covered_detection_failure"]
+                != row[size + "_fn"]
+            ):
+                raise RuntimeError(
+                    "batch summary %s FN stages do not equal size FN" % size
+                )
+        if sum(row[size + "_rpn_uncovered"] for size in SIZES) != row["rpn_uncovered_fn"]:
+            raise RuntimeError("size RPN-uncovered FN does not equal total")
+        if sum(
+            row[size + "_rpn_covered_detection_failure"] for size in SIZES
+        ) != row["rpn_covered_detection_failure_fn"]:
+            raise RuntimeError("size downstream FN does not equal total")
         rows.append(row)
     return rows, sample_manifests
 
