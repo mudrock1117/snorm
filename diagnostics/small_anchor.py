@@ -22,6 +22,7 @@ CRITICAL_PREFIXES = (
     "teacher.backbone_3.",
     "teacher.proj_norm.",
     "teacher.rpn_norm.",
+    "teacher.rpn_eval.",
     "teacher.box_head_norm.",
 )
 
@@ -188,6 +189,8 @@ def load_small_anchor_checkpoint(
     print("expanded parameters =", [
         item["key"] for item in expanded_parameters
     ])
+    for item in expanded_parameters:
+        print("expanded mapping {} = {}".format(item["key"], item["mapping"]))
     print("newly initialized channels =", initialized_per_ratio)
     print("new channel init =", (
         "existing RPN normal std=0.01, bias=0"
