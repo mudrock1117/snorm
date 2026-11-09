@@ -13,6 +13,7 @@ from detection.config import cfg
 from detection.data.build import build_datasets
 from detection.modeling.build import build_detectors
 from diagnostics.checkpoint import load_detector_checkpoint
+from diagnostics.small_anchor import load_small_anchor_checkpoint
 from diagnostics.detection_analysis import load_sample_ids, run_step_sweep, seed_everything
 from diagnostics.gt_matching import analyze_step_sweep, save_ground_truth
 from diagnostics.dataset_index import (
@@ -92,6 +93,10 @@ def main():
     parser.add_argument("--seed", type=int, default=20261104)
     parser.add_argument("--save-tensors", action="store_true")
     parser.add_argument("--allow-critical-missing", action="store_true")
+    parser.add_argument(
+        "--small-anchor-compat", action="store_true",
+        help="audited E2 64/128/256/512 to A 32/64/128/256/512 load",
+    )
     parser.add_argument("--match-iou-threshold", type=float, default=0.5)
     parser.add_argument("--match-score-threshold", type=float, default=0.0)
     parser.add_argument("--rpn-fn-iou-threshold", type=float, default=0.5)
@@ -109,10 +114,17 @@ def main():
     seed_everything(args.seed)
 
     model = build_detectors(cfg).to(device)
-    load_detector_checkpoint(
-        model, args.checkpoint,
-        allow_critical_missing=args.allow_critical_missing,
-    )
+    if args.small_anchor_compat:
+        load_small_anchor_checkpoint(
+            model, args.checkpoint,
+            old_anchor_sizes=(64, 128, 256, 512),
+            new_anchor_sizes=tuple(cfg.MODEL.RPN.ANCHOR_SIZES),
+        )
+    else:
+        load_detector_checkpoint(
+            model, args.checkpoint,
+            allow_critical_missing=args.allow_critical_missing,
+        )
     model.eval()
 
     test_names = list(cfg.DATASETS.TESTS)
