@@ -428,7 +428,8 @@ def main(det_cfg, args):
     work_dir = det_cfg.WORK_DIR
     _exp_wd = os.environ.get('SNORM_EXPERIMENT', 'E0')
     if _exp_wd != 'E0':
-        work_dir = os.path.join(work_dir, _exp_wd)
+        _work_suffix = 'E2' if _exp_wd == 'A3' else _exp_wd
+        work_dir = os.path.join(work_dir, _work_suffix)
         os.makedirs(work_dir, exist_ok=True)
         print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
     if args.test_only:
