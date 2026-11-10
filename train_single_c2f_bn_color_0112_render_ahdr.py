@@ -395,7 +395,12 @@ def main(det_cfg, args):
     except Exception:
         _git_sha = 'unavailable'
     print('[EXPERIMENT START]')
-    print('experiment =', 'A_SMALLANCHOR' if _is_small_anchor_a else os.environ.get('SNORM_EXPERIMENT', 'E0'))
+    print('experiment =', (
+        'A3_PROTECTED_SMALLANCHOR'
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A3'
+        else 'A_SMALLANCHOR' if _is_small_anchor_a
+        else os.environ.get('SNORM_EXPERIMENT', 'E0')
+    ))
     print('git SHA =', _git_sha)
     print('anchor sizes =', _anchor_sizes)
     print('number of anchors =', len(_anchor_sizes) * len(_aspect_ratios))
