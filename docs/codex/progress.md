@@ -66,3 +66,11 @@
 - A3 跳过 epoch 边界的 SNorm 状态更新，避免冻结的 proj_norm 被 compute_norm_parameters 改写。
 - 新增 CPU/GPU audit 工具，检查 checkpoint mapping、白名单、梯度 mask、旧通道/冻结模块零变化以及新增通道发生更新。
 - 未启动正式训练；audit 与 GPU 验证待服务器使用 GPU1 执行。
+
+
+## 2026-11-10 A3 audit RPN API 修复
+
+- 服务器发现 audit 直接调用 `RPN.losses()` 后误按 dict 读取；真实 `RPN.losses()` 返回 `(objectness_loss, box_loss)` tuple。
+- 已改为调用真实 `rpn_norm.forward(None, feature, img_metas, targets)`，按正式 ModuleSet mode=5 相同契约解析 `(proposals, loss_dict, logits, bbox_pd)`。
+- 新增返回契约测试，明确拒绝把直接 losses tuple 当作 forward loss dict。
+- 本地 CPU 纯逻辑 smoke 已通过；真实服务器 CPU/GPU RPN forward audit 仍待用户执行。
