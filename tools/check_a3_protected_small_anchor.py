@@ -5,7 +5,6 @@ from __future__ import print_function
 import argparse
 
 import torch
-import torch.nn.functional as F
 
 from detection.config import cfg
 from detection.modeling.build import build_detectors
@@ -15,6 +14,7 @@ from diagnostics.a3_protected import (
     ProtectedSmallAnchorStep,
     audit_a3_trainable_parameters,
     configure_a3_trainable_parameters,
+    parse_rpn_training_output,
 )
 from diagnostics.small_anchor import load_small_anchor_checkpoint
 
@@ -95,12 +95,11 @@ def main():
         ),
         "labels": torch.ones(1, dtype=torch.long, device=device),
     }]
-    anchors = rpn.anchor_generator([feature])
-    hidden = F.relu(rpn.conv(feature))
-    cls_logits = rpn.cls_logits(hidden)
-    bbox_pred = rpn.bbox_pred(hidden)
-    losses = rpn.losses(
-        anchors, cls_logits, bbox_pred, img_metas, targets
+    rpn_output = rpn(
+        None, feature, img_metas, targets
+    )
+    proposals, losses, cls_logits, bbox_pred = parse_rpn_training_output(
+        rpn_output
     )
     loss = losses["rpn_cls_loss"] + losses["rpn_reg_loss"]
     optimizer.zero_grad()
@@ -190,6 +189,8 @@ def main():
     print("[A3 AUDIT PASS]")
     print("device =", device)
     print("loss =", float(loss.detach().cpu().item()))
+    print("proposal counts =", [int(value.size(0)) for value in proposals])
+    print("RPN loss keys =", sorted(losses.keys()))
     print("cls shape =", list(cls_logits.shape))
     print("bbox shape =", list(bbox_pred.shape))
     print("raw new-channel gradient max =", raw_new_gradient)
