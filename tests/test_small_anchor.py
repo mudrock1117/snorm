@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from diagnostics.small_anchor import (
@@ -101,3 +102,35 @@ def test_a3_restore_blocks_adam_weight_decay_on_old_channels():
         cls_weight.detach()[list(CLS_NEW_CHANNELS)], new_before
     )
     assert all(value == 0.0 for value in deltas.values())
+
+
+def test_a3_parses_real_rpn_forward_contract():
+    from diagnostics.a3_protected import parse_rpn_training_output
+
+    cls_loss = torch.tensor(1.0)
+    reg_loss = torch.tensor(2.0)
+    output = (
+        [torch.zeros(3, 4)],
+        {"rpn_cls_loss": cls_loss, "rpn_reg_loss": reg_loss},
+        torch.zeros(1, 15, 2, 2),
+        torch.zeros(1, 60, 2, 2),
+    )
+    proposals, losses, logits, bbox_pd = parse_rpn_training_output(output)
+    assert proposals[0].shape == (3, 4)
+    assert losses["rpn_cls_loss"] is cls_loss
+    assert losses["rpn_reg_loss"] is reg_loss
+    assert logits.shape[1] == 15
+    assert bbox_pd.shape[1] == 60
+
+
+def test_a3_rejects_direct_rpn_losses_tuple_as_forward_loss_dict():
+    from diagnostics.a3_protected import parse_rpn_training_output
+
+    wrong_output = (
+        [torch.zeros(3, 4)],
+        (torch.tensor(1.0), torch.tensor(2.0)),
+        torch.zeros(1, 15, 2, 2),
+        torch.zeros(1, 60, 2, 2),
+    )
+    with pytest.raises(TypeError, match="second item must be a loss dict"):
+        parse_rpn_training_output(wrong_output)
