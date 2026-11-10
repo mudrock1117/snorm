@@ -55,3 +55,14 @@
 - 内部 hook 默认关闭，每 Step 独立保存并立即移除；原始 tensor 保存另设开关。
 - 禁止按数组索引跨 Step 比较 proposals/ROI rows，需使用 GT/class/IoU 或空间匹配。
 - 未运行服务器 GPU 测试，待固定 Fog 样本验证。
+
+
+## 2026-11-10 A3 Protected Small-Anchor
+
+- 新增独立 A3 配置，保持 clear-source-only、32/64/128/256/512 anchors 和原 Fog/Night evaluation。
+- 复用已审计的 E2→A checkpoint expansion，不改变 anchor ordering、RPN forward、proposal、matcher、NMS 或 evaluator。
+- A3 optimizer 白名单仅含 rpn_norm 的 cls_logits/bbox_pred 四个 Parameter；backbone、proj_norm、box head、RPN shared conv 和 rpn_eval 全部冻结。
+- 新增 32-anchor 通道以外的梯度在 optimizer step 前清零；step 后恢复旧通道并清零对应 Adam state，防止 weight decay/momentum 漂移。
+- A3 跳过 epoch 边界的 SNorm 状态更新，避免冻结的 proj_norm 被 compute_norm_parameters 改写。
+- 新增 CPU/GPU audit 工具，检查 checkpoint mapping、白名单、梯度 mask、旧通道/冻结模块零变化以及新增通道发生更新。
+- 未启动正式训练；audit 与 GPU 验证待服务器使用 GPU1 执行。
