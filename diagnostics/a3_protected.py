@@ -16,6 +16,26 @@ BBOX_NEW_CHANNELS = tuple(
 )
 
 
+def parse_rpn_training_output(output):
+    """Parse the real RPN.forward contract used by ModuleSet mode=5."""
+    if not isinstance(output, (tuple, list)) or len(output) != 4:
+        raise TypeError(
+            "RPN.forward must return (proposals, loss_dict, logits, bbox_pd)"
+        )
+    proposals, losses, logits, bbox_pd = output
+    if not isinstance(losses, dict):
+        raise TypeError(
+            "RPN.forward second item must be a loss dict; got %s"
+            % type(losses).__name__
+        )
+    missing = [
+        key for key in ("rpn_cls_loss", "rpn_reg_loss") if key not in losses
+    ]
+    if missing:
+        raise KeyError("RPN training loss dict is missing keys: %s" % missing)
+    return proposals, losses, logits, bbox_pd
+
+
 def unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
