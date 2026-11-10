@@ -29,6 +29,11 @@ from detection.engine.eval import evaluation
 from detection.modeling.build import build_detectors
 from detection.utils import dist_utils
 from diagnostics.small_anchor import load_small_anchor_checkpoint
+from diagnostics.a3_protected import (
+    ProtectedSmallAnchorStep,
+    audit_a3_trainable_parameters,
+    configure_a3_trainable_parameters,
+)
 
 #from saver_domain import Saver
 import torch.nn.functional as F
@@ -125,7 +130,8 @@ def term_sig_hanlder(signum, frame):
 
 
 def train_one_epoch(model_det, model_tran, optimizers, lr_schedulers, train_loader, target_loader, device, epoch, print_freq=10, writer=None, test_func=None, save_func=None, \
-det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=None):
+det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=None,\
+a3_controller=None):
     global global_step
     global global_start
     global global_index
@@ -201,7 +207,7 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
                 torch.cuda.empty_cache()
             else:
                 _exp_loop = os.environ.get('SNORM_EXPERIMENT', 'E0')
-                if _exp_loop in ('E1', 'E2'):
+                if _exp_loop in ('E1', 'E2', 'A3'):
                     loss_dict_det, _ = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, \
                                                 is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
                     det_loss_det = sum(list(loss_dict_det.values()))
@@ -246,8 +252,15 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
                     gc.collect()
                     torch.cuda.empty_cache()
 
+            _a3_snapshots = None
+            if a3_controller is not None:
+                if len(optimizers) != 1:
+                    raise RuntimeError('A3 requires exactly one optimizer')
+                _a3_snapshots = a3_controller.before_step()
             for optimizer in optimizers:
                 optimizer.step()
+            if a3_controller is not None:
+                a3_controller.after_step(optimizers[0], _a3_snapshots)
         
             for lr_scheduler in lr_schedulers:
                 lr_scheduler.step()
@@ -316,7 +329,10 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
     for name, m in model_inner.named_modules():
         if type(m).__name__ == 'SNorm':
             snorm_modules.append((name, m))
+    _a3_active = os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A3'
     for name, m in snorm_modules:
+        if _a3_active:
+            continue
         if hasattr(m, '_clip_internal_params'):
             try: m._clip_internal_params()
             except Exception as e: pass
@@ -329,11 +345,13 @@ det_cfg=None, args=None, i2i_cfg=None, save_cfg=None, eval_model=None, saver=Non
         print(f"[Epoch {epoch}] SNorm '{name}': alpha_ba={m.alpha_ba.data.cpu().numpy()}, alpha_bu={m.alpha_bu.data.cpu().numpy()}")
 
     _pjotype = det_cfg.MODEL.MODE.PJOTYPE
-    if _pjotype != 'BN':
+    if _pjotype != 'BN' and not _a3_active:
         if hasattr(model_det, 'module'):
             model_det.module.teacher.proj_norm.compute_norm_parameters(device=device)
         else:
             model_det.teacher.proj_norm.compute_norm_parameters(device=device)
+    elif _a3_active:
+        print('[A3] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
 
 def main(det_cfg, args):
     print('----num_workers:', det_cfg.DATALOADER.NUM_WORKERS)
@@ -421,6 +439,7 @@ def main(det_cfg, args):
     print('--set optimizer')
     model_paramters = []
     model_eval_parameters = []
+    a3_controller = None
     if det_cfg.MODEL.MODE.TRAIN_PROCESS == 'S0':
           if det_cfg.MODEL.MODE.PJOTYPE == 'BN':
               model_paramters += [{'params': model_without_ddp.teacher.parameters(),'lr':det_cfg.SOLVER.LR}]
@@ -433,7 +452,17 @@ def main(det_cfg, args):
               _rn = _proj.render_net
               _sp = getattr(_proj, 'sigma_weight_pred', None)
               def _count(_params): return sum(p.numel() for p in _params)
-              if _exp == 'E1':
+              if _exp == 'A3':
+                  if not _is_small_anchor_a:
+                      raise RuntimeError('A3 requires anchor sizes (32,64,128,256,512)')
+                  _a3_parameters = configure_a3_trainable_parameters(model_without_ddp)
+                  model_paramters += [{
+                      'params': _a3_parameters,
+                      'lr': _base_lr,
+                      'name': 'a3_new_32_anchor_output_channels',
+                  }]
+                  a3_controller = ProtectedSmallAnchorStep(model_without_ddp)
+              elif _exp == 'E1':
                   print('  [E1] SNORM_EXPERIMENT=E1: 冻结 backbone+proj_norm；训练 rpn_norm + box_head_norm')
                   for p in _teacher.backbone_0.parameters(): p.requires_grad_(False)
                   for p in _teacher.backbone_1.parameters(): p.requires_grad_(False)
@@ -495,6 +524,8 @@ def main(det_cfg, args):
                       sum(p.numel() for p in _group_params if p.requires_grad)
                   ))
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
+          if a3_controller is not None:
+              audit_a3_trainable_parameters(model_without_ddp, optimizer_model)
           _total_epochs = det_cfg.SOLVER.EPOCHS
           _t_max = max(1, _total_epochs * len(train_loader))
           schedulers = [
@@ -594,7 +625,8 @@ def main(det_cfg, args):
 
         epoch_start = time.time()
         train_one_epoch(model_det, None, optimizers, schedulers, train_loader, target_loader, device, epoch,
-                writer=losses_writer, test_func=test_func, save_func=save_func, det_cfg=det_cfg, args=args)
+                writer=losses_writer, test_func=test_func, save_func=save_func, det_cfg=det_cfg, args=args,
+                a3_controller=a3_controller)
 
  
         #if epoch> 0 and epoch % 4 ==0:
