@@ -134,3 +134,67 @@ def test_a3_rejects_direct_rpn_losses_tuple_as_forward_loss_dict():
     )
     with pytest.raises(TypeError, match="second item must be a loss dict"):
         parse_rpn_training_output(wrong_output)
+
+
+def test_a4_updates_shared_conv_and_only_new_output_channels():
+    from diagnostics.a3_protected import (
+        A4_OUTPUT_LR,
+        A4_SHARED_CONV_LR,
+        CLS_NEW_CHANNELS,
+        ProtectedSmallAnchorStep,
+        audit_a4_trainable_parameters,
+        configure_a4_trainable_parameters,
+    )
+
+    model = _ToyDetector()
+    outputs, shared_conv, conv_names = configure_a4_trainable_parameters(model)
+    optimizer = torch.optim.Adam(
+        [
+            {
+                "params": outputs,
+                "lr": A4_OUTPUT_LR,
+                "name": "a4_new_32_anchor_output",
+            },
+            {
+                "params": shared_conv,
+                "lr": A4_SHARED_CONV_LR,
+                "name": "a4_rpn_shared_conv",
+            },
+        ],
+        lr=A4_OUTPUT_LR,
+        weight_decay=0.1,
+    )
+    audit_a4_trainable_parameters(model, optimizer)
+    controller = ProtectedSmallAnchorStep(
+        model, extra_trainable_names=conv_names
+    )
+
+    cls_weight = model.teacher.rpn_norm.cls_logits.weight
+    conv_weight = model.teacher.rpn_norm.conv.weight
+    old_mask = torch.ones(15, dtype=torch.bool)
+    old_mask[list(CLS_NEW_CHANNELS)] = False
+    old_before = cls_weight.detach()[old_mask].clone()
+    new_before = cls_weight.detach()[list(CLS_NEW_CHANNELS)].clone()
+    conv_before = conv_weight.detach().clone()
+
+    for group in optimizer.param_groups:
+        for parameter in group["params"]:
+            parameter.grad = torch.ones_like(parameter)
+    snapshots = controller.before_step()
+    assert cls_weight.grad.detach()[old_mask].abs().max().item() == 0
+    optimizer.step()
+    deltas = controller.after_step(optimizer, snapshots)
+
+    assert torch.equal(cls_weight.detach()[old_mask], old_before)
+    assert not torch.equal(
+        cls_weight.detach()[list(CLS_NEW_CHANNELS)], new_before
+    )
+    assert not torch.equal(conv_weight.detach(), conv_before)
+    assert all(value == 0.0 for value in deltas.values())
+    assert [group["lr"] for group in optimizer.param_groups] == [
+        A4_OUTPUT_LR, A4_SHARED_CONV_LR
+    ]
+    assert set(conv_names) == {
+        "teacher.rpn_norm.conv.weight",
+        "teacher.rpn_norm.conv.bias",
+    }
