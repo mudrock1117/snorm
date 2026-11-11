@@ -567,9 +567,24 @@ def main(det_cfg, args):
                   audit_a3_trainable_parameters(model_without_ddp, optimizer_model)
           _total_epochs = det_cfg.SOLVER.EPOCHS
           _t_max = max(1, _total_epochs * len(train_loader))
-          schedulers = [
-             torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_model, T_max=_t_max, eta_min=1e-6),
-          ]
+          if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A4':
+              _a4_min_factor = 1e-6 / A4_OUTPUT_LR
+              def _a4_lr_factor(_step):
+                  _progress = min(float(_step), float(_t_max)) / float(_t_max)
+                  return _a4_min_factor + 0.5 * (1.0 - _a4_min_factor) * (
+                      1.0 + math.cos(math.pi * _progress)
+                  )
+              schedulers = [
+                  torch.optim.lr_scheduler.LambdaLR(
+                      optimizer_model, lr_lambda=_a4_lr_factor
+                  ),
+              ]
+          else:
+              schedulers = [
+                 torch.optim.lr_scheduler.CosineAnnealingLR(
+                     optimizer_model, T_max=_t_max, eta_min=1e-6
+                 ),
+              ]
 
           optimizers = [optimizer_model]
           optimizers_evaluation = []
