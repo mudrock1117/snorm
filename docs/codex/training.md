@@ -13,3 +13,15 @@
 - 原 VOC evaluator、每 1000 step 评估和 best checkpoint 规则未修改。
 
 验证状态：代码与通道映射已静态审计；`tools/check_a3_protected_small_anchor.py` 的真实 CPU/GPU audit 尚待服务器执行。
+
+
+## A4 / Protected-RPN Adaptation
+
+- A4 保留 A3 的 32-anchor output 通道保护：仅 cls `[0,5,10]` 与 bbox `[0:4,20:24,40:44]` 可更新，旧 output 通道在 step 后恢复并清理对应 Adam state。
+- 在此基础上，仅额外开放实际存在的 `teacher.rpn_norm.conv.{weight,bias}`；shared conv 不做通道 mask。
+- optimizer 严格分为两个参数组：新增 output 通道所在四个 Parameter 使用 `5e-5`，shared conv 两个 Parameter 使用 `5e-6`。
+- backbone_0/1/2/3、proj_norm、box_head_norm、rpn_eval 均冻结；A4 与 A3 一样跳过 epoch 边界 SNorm 状态更新。
+- 独立配置使用 clear-source-only 训练、`(32,64,128,256,512)` anchors 与独立目录 `s0_dbias_color_A4_protected_rpn/E2`。
+- `tools/check_a4_protected_rpn.py` 走真实 RPN training forward/loss contract，并检查 optimizer、旧/新通道、shared conv 与所有冻结模块的参数变化。
+
+验证状态：A4 保护器 CPU smoke 已通过；真实 checkpoint expansion、RPN loss 与 GPU audit 尚待服务器 GPU1 验证，未启动正式训练。
