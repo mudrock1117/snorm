@@ -74,3 +74,12 @@
 - 已改为调用真实 `rpn_norm.forward(None, feature, img_metas, targets)`，按正式 ModuleSet mode=5 相同契约解析 `(proposals, loss_dict, logits, bbox_pd)`。
 - 新增返回契约测试，明确拒绝把直接 losses tuple 当作 forward loss dict。
 - 本地 CPU 纯逻辑 smoke 已通过；真实服务器 CPU/GPU RPN forward audit 仍待用户执行。
+
+
+## 2026-11-11 A4 Protected-RPN Adaptation
+
+- 基于已通过服务器 GPU audit 的 A3，新增可选 A4：继续保护全部旧 anchor output 通道，只额外开放 `teacher.rpn_norm.conv.{weight,bias}`。
+- A4 optimizer 只有两个参数组：四个 RPN output Parameter（LR `5e-5`）与实际 shared conv Parameter（LR `5e-6`）。
+- A3 的 backward 后 mask、旧通道快照、step 后恢复及 Adam state 清理被直接复用；shared conv 不做 mask。
+- 新增独立 A4 clear-source 配置、真实 RPN forward/loss GPU audit 和 CPU 单元测试；未修改检测 forward、AHDR/SNorm、ROI 或 evaluator。
+- 本地 CPU 保护机制 smoke 通过；GPU audit 和正式训练均未执行，待服务器 GPU1 验证。
