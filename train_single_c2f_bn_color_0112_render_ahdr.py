@@ -31,8 +31,12 @@ from detection.utils import dist_utils
 from diagnostics.small_anchor import load_small_anchor_checkpoint
 from diagnostics.a3_protected import (
     ProtectedSmallAnchorStep,
+    A4_OUTPUT_LR,
+    A4_SHARED_CONV_LR,
     audit_a3_trainable_parameters,
+    audit_a4_trainable_parameters,
     configure_a3_trainable_parameters,
+    configure_a4_trainable_parameters,
 )
 
 #from saver_domain import Saver
@@ -207,7 +211,7 @@ a3_controller=None):
                 torch.cuda.empty_cache()
             else:
                 _exp_loop = os.environ.get('SNORM_EXPERIMENT', 'E0')
-                if _exp_loop in ('E1', 'E2', 'A3'):
+                if _exp_loop in ('E1', 'E2', 'A3', 'A4'):
                     loss_dict_det, _ = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, \
                                                 is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
                     det_loss_det = sum(list(loss_dict_det.values()))
@@ -329,7 +333,7 @@ a3_controller=None):
     for name, m in model_inner.named_modules():
         if type(m).__name__ == 'SNorm':
             snorm_modules.append((name, m))
-    _a3_active = os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A3'
+    _a3_active = os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A3', 'A4')
     for name, m in snorm_modules:
         if _a3_active:
             continue
@@ -351,7 +355,7 @@ a3_controller=None):
         else:
             model_det.teacher.proj_norm.compute_norm_parameters(device=device)
     elif _a3_active:
-        print('[A3] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
+        print('[A3/A4] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
 
 def main(det_cfg, args):
     print('----num_workers:', det_cfg.DATALOADER.NUM_WORKERS)
@@ -396,7 +400,9 @@ def main(det_cfg, args):
         _git_sha = 'unavailable'
     print('[EXPERIMENT START]')
     print('experiment =', (
-        'A3_PROTECTED_SMALLANCHOR'
+        'A4_PROTECTED_RPN'
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A4'
+        else 'A3_PROTECTED_SMALLANCHOR'
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A3'
         else 'A_SMALLANCHOR' if _is_small_anchor_a
         else os.environ.get('SNORM_EXPERIMENT', 'E0')
@@ -433,7 +439,7 @@ def main(det_cfg, args):
     work_dir = det_cfg.WORK_DIR
     _exp_wd = os.environ.get('SNORM_EXPERIMENT', 'E0')
     if _exp_wd != 'E0':
-        _work_suffix = 'E2' if _exp_wd == 'A3' else _exp_wd
+        _work_suffix = 'E2' if _exp_wd in ('A3', 'A4') else _exp_wd
         work_dir = os.path.join(work_dir, _work_suffix)
         os.makedirs(work_dir, exist_ok=True)
         print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
@@ -458,7 +464,31 @@ def main(det_cfg, args):
               _rn = _proj.render_net
               _sp = getattr(_proj, 'sigma_weight_pred', None)
               def _count(_params): return sum(p.numel() for p in _params)
-              if _exp == 'A3':
+              if _exp == 'A4':
+                  if not _is_small_anchor_a:
+                      raise RuntimeError('A4 requires anchor sizes (32,64,128,256,512)')
+                  if float(_base_lr) != float(A4_OUTPUT_LR):
+                      raise RuntimeError(
+                          'A4 requires SOLVER.LR=%s; got %s'
+                          % (A4_OUTPUT_LR, _base_lr)
+                      )
+                  _a4_outputs, _a4_conv, _a4_conv_names = (
+                      configure_a4_trainable_parameters(model_without_ddp)
+                  )
+                  model_paramters += [{
+                      'params': _a4_outputs,
+                      'lr': A4_OUTPUT_LR,
+                      'name': 'a4_new_32_anchor_output',
+                  }, {
+                      'params': _a4_conv,
+                      'lr': A4_SHARED_CONV_LR,
+                      'name': 'a4_rpn_shared_conv',
+                  }]
+                  a3_controller = ProtectedSmallAnchorStep(
+                      model_without_ddp,
+                      extra_trainable_names=_a4_conv_names,
+                  )
+              elif _exp == 'A3':
                   if not _is_small_anchor_a:
                       raise RuntimeError('A3 requires anchor sizes (32,64,128,256,512)')
                   _a3_parameters = configure_a3_trainable_parameters(model_without_ddp)
@@ -531,7 +561,10 @@ def main(det_cfg, args):
                   ))
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
           if a3_controller is not None:
-              audit_a3_trainable_parameters(model_without_ddp, optimizer_model)
+              if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A4':
+                  audit_a4_trainable_parameters(model_without_ddp, optimizer_model)
+              else:
+                  audit_a3_trainable_parameters(model_without_ddp, optimizer_model)
           _total_epochs = det_cfg.SOLVER.EPOCHS
           _t_max = max(1, _total_epochs * len(train_loader))
           schedulers = [
