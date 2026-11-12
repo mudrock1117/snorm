@@ -142,9 +142,9 @@ class SNorm(nn.Module):
         self.alpha_ba.data.fill_(1.0)
         self.alpha_bu.data.zero_()
 
-    def forward(self, feats, use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=None, targets=None):
+    def forward(self, feats, use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=None, targets=None, force_eval_render=False):
         ################## segnet ####################
-        if self.training:
+        if self.training and not force_eval_render:
             # global
             if moe_mode == 0:
                 feats_0 = self.user_norm_v2(feats, mode=0, kernel_sz_set=[1, 1], w_a=1.0, w_u=1.0, ema=1.0)
@@ -765,6 +765,11 @@ class SNorm(nn.Module):
 
             output = self.norm_forward(output)
             output_dict = {'feature_dict': feats_mem, 'weight_dict': [None]}
+            if '_raw_render' in locals():
+                output_dict['selective_base'] = self.norm_forward(save_im0)
+                output_dict['selective_restored'] = self.norm_forward(_raw_render)
+                output_dict['selective_legacy'] = output
+                output_dict['legacy_residual_weight'] = _res_w
             return output, output_dict
 
     ############################
