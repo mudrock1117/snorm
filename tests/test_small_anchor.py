@@ -369,3 +369,37 @@ def test_source_object_mask_non_square_width_height_projection_and_clipping():
     assert masks[1, 0].sum().item() == 10 * 20
     assert masks[2, 0].sum().item() == 1
     assert masks[2, 0, 9, 19].item() == 1
+
+
+def test_selective_consistency_exact_optimum_has_zero_not_none_gradients():
+    from detection.modeling.norm.selective_ahdr import SelectiveAHDRGate
+
+    gate_module = SelectiveAHDRGate(
+        channels=3, hidden_channels=8, alpha_max=1.2, gate_init=0.5
+    )
+    base = torch.randn(1, 3, 5, 7)
+    restored = base + torch.randn_like(base) * 0.1
+    selected, _ = gate_module(base, restored)
+    exact_reference = selected.detach().clone()
+    exact_loss = torch.nn.functional.smooth_l1_loss(
+        selected, exact_reference
+    )
+    exact_gradients = torch.autograd.grad(
+        exact_loss, list(gate_module.parameters()), allow_unused=True
+    )
+    assert all(gradient is not None for gradient in exact_gradients)
+    assert all(gradient.abs().max().item() == 0 for gradient in exact_gradients)
+
+    with torch.no_grad():
+        gate_module.predictor.bias.add_(0.2)
+    perturbed, _ = gate_module(base, restored)
+    perturbed_loss = torch.nn.functional.smooth_l1_loss(
+        perturbed, exact_reference
+    )
+    perturbed_gradients = torch.autograd.grad(
+        perturbed_loss, list(gate_module.parameters()), allow_unused=True
+    )
+    assert all(gradient is not None for gradient in perturbed_gradients)
+    assert max(
+        gradient.abs().max().item() for gradient in perturbed_gradients
+    ) > 0
