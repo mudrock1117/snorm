@@ -25,3 +25,18 @@
 - `tools/check_a4_protected_rpn.py` 走真实 RPN training forward/loss contract，并检查 optimizer、旧/新通道、shared conv 与所有冻结模块的参数变化。
 
 验证状态：A4 保护器 CPU smoke 已通过；真实 checkpoint expansion、RPN loss 与 GPU audit 尚待服务器 GPU1 验证，未启动正式训练。
+
+
+## B1 / Protected Small-Anchor + Selective-AHDR
+
+- B1 被硬性固定从 `/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/s0_dbias_color_E2_zdh/E2/best.pth` 初始化；禁止接续 A3/A4/E2-cont。
+- 真实旧推理在每一步执行 `output = 0.6 * raw_render + 0.4 * save_im0`；`save_im0` 是全局 `user_norm_v2` 后经 `norm_back` 的稳定基准，最终 step6 的 raw AHDR 输出是恢复端点。
+- 新 gate 输入为 `[F0, Fr-F0]`，结构为 `Conv3x3(6→8)+ReLU+Conv1x1(8→1)+sigmoid`，共 449 参数。
+- 输出为 `F0 + alpha_max*M*(Fr-F0)`。默认 `alpha_max=1.2`、最终卷积零初始化、`M=0.5`，因此初始有效系数严格为 0.6，与旧路径数学等价。
+- B1 独立 `mode_training=13`：clear source 生成 stop-gradient clean reference，项目已有 synthetic degraded source 进入六步 AHDR、gate 和真实 RPN/ROI detection loss。
+- 辅助损失仅使用 source：SmoothL1 consistency、source-GT object-mask consistency、相对初始 gate 0.5 的轻量正则；默认权重分别为 0.01、0.01、0.001。
+- optimizer 只包含 A3 四个 RPN output Parameter（仅新通道有效，LR 5e-5）与 gate 四个 Parameter（LR 1e-5）；shared RPN conv、render_net、SNorm、backbone、ROI 与 rpn_eval 冻结。
+- B1 继承 A3 epoch 边界保护：跳过 frozen proj_norm 的 clip/reset/`compute_norm_parameters()`，只执行 gate 与新 anchor 的 optimizer/scheduler 更新。
+- `SELECTIVE_AHDR.ENABLED=False` 时不实例化 gate，旧配置、checkpoint state_dict 和 forward 行为不变。
+
+验证状态：Python 语法检查和聚焦 CPU smoke 已通过；真实数据、checkpoint、GPU audit 与训练尚未执行。
