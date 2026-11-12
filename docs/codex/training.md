@@ -49,3 +49,10 @@
 - B1 在 DDP 包装前固定 requires_grad whitelist；backward 返回后梯度已经 all-reduce，再执行 old-anchor mask → snapshot → optimizer.step → restore/state clear。
 - mode13 必须包含 clear-source GT 的四项 detection loss：rpn/rcnn cls/reg；Fog/Night 不参与训练。
 - LR 不随 global batch 放大：new-anchor 5e-5，Gate 1e-5。
+
+
+### B1 DDP batch 配置修正（2026-11-12）
+
+- 首版 ddp3 YAML 把换行误写为字面量 `\\n`，导致 `BATCH_SIZE: 4` 位于注释内并回退到默认值 1；真实首次 DDP audit 因此执行 batch1。
+- YAML 已修复为真实独立配置行。正式训练入口同时断言 cfg batch、BatchSampler batch 一致且 DDP per-rank batch 必须为4。
+- protected-update audit 默认显式使用轻量 execution batch1，并与 formal per-rank batch4 分开报告；`--config-only` 使用真实 batch4 DataLoader 验证 global12/1610 steps。
