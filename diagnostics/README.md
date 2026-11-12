@@ -344,3 +344,18 @@ python -m torch.distributed.launch --nproc_per_node=3 --master_port=29631 \
 ```
 
 audit 每个 rank 执行一个真实 mode13 forward/backward/optimizer step，rank0 汇总 sampler、Gate/anchor gradient、protected delta 和冻结模块 delta。该工具不会启动正式训练。
+
+
+### B1 DDP batch 检查
+
+Protected-update audit 默认使用明确的轻量执行 batch 1；其输出分别标记 formal batch 与 audit execution batch。无需 backward 的正式 DataLoader 检查：
+
+```bash
+CUDA_VISIBLE_DEVICES=1,2,3 SNORM_EXPERIMENT=B1 \
+python -m torch.distributed.launch --nproc_per_node=3 --master_port=29633 \
+  tools/check_b1_ddp.py --config-only \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color_B1_selective_ahdr_ddp3.yaml \
+  --checkpoint /home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/s0_dbias_color_E2_zdh/E2/best.pth
+```
+
+预期 formal per-rank/global batch 为 4/12，sampler samples/rank 为 6440，steps/epoch 为 1610。若需用 batch4 重跑完整 protected audit，增加 `--execution-batch-size 4`。
