@@ -75,7 +75,7 @@ def project_source_boxes_to_mask(targets, feature_size, image_sizes=None,
         dtype = torch.float32
     mask = torch.zeros(batch, 1, height, width, device=device, dtype=dtype)
     for batch_index, target in enumerate(targets):
-        boxes = target.get("boxes")
+        boxes = target["boxes"]
         if boxes is None or boxes.numel() == 0:
             continue
         if image_sizes is None:
