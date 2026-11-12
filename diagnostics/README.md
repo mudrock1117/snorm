@@ -329,3 +329,18 @@ python tools/analyze_snorm_root_cause.py \
 ```
 
 该命令只读取现有 JSON，输出 `diagnostic_root_cause.txt/json/csv`。FP 使用互斥优先级：duplicate > classification > localization > background。Step0/Step6 FP 身份通过同类别且预测框 IoU>=0.5 的贪心空间匹配建立，不使用 proposal、ROI 或预测数组索引。运行时强制检查 `TP+FN=GT`、四类 FP 之和等于 FP、FN 的尺度/阶段之和等于 FN。结果是固定样本诊断，不是 VOC mAP。
+
+
+## B1 三卡 DDP audit
+
+三张物理 GPU 通过环境变量映射为进程内 logical GPU 0/1/2：
+
+```bash
+CUDA_VISIBLE_DEVICES=1,2,3 SNORM_EXPERIMENT=B1 \
+python -m torch.distributed.launch --nproc_per_node=3 --master_port=29631 \
+  tools/check_b1_ddp.py \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color_B1_selective_ahdr_ddp3.yaml \
+  --checkpoint /home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/s0_dbias_color_E2_zdh/E2/best.pth
+```
+
+audit 每个 rank 执行一个真实 mode13 forward/backward/optimizer step，rank0 汇总 sampler、Gate/anchor gradient、protected delta 和冻结模块 delta。该工具不会启动正式训练。
