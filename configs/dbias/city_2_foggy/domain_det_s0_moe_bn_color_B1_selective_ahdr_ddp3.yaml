@@ -56,7 +56,8 @@ SOLVER:
   EPOCHS: 120
   STEPS: (16000, 32000, 42000)
   LR: 5e-5
-  # Per-rank batch size under DistributedSampler/DDP (3 ranks => global 12).\n  BATCH_SIZE: 4
+  # Per-rank batch size under DistributedSampler/DDP (3 ranks => global 12).
+  BATCH_SIZE: 4
   GAMMA: 0.3
 TEST:
   EVAL_TYPES: ['voc']
