@@ -136,3 +136,10 @@
 - 修复 DDP rank 绑定前错误预初始化 logical GPU0、DDP 包装前未固定 B1 requires_grad whitelist、rank0 日志和 evaluation 目录并发写风险。
 - 新增 global step 500/1000/1500/1650/2000 的独立 checkpoint 与 Fog/Night VOC evaluation 编排。
 - CPU sampler smoke 确认 19318 / 3 → 6440 samples/rank，batch4 → 1610 steps/epoch，global batch12。
+
+
+### B1 DDP audit batch 修正（2026-11-12）
+
+- 三卡 protected-update audit 已真实 PASS，但暴露 ddp3 YAML 的字面量换行使 batch4 被注释、实际回退 batch1。
+- 已修复正式配置并新增 cfg/BatchSampler/input batch 三层报告与断言；正式目标恢复为 per-rank4、global12、6440 samples/rank、1610 steps/epoch。
+- 已通过 CPU sampler/config 逻辑检查；真实服务器 `--config-only` DataLoader audit 待执行。无需因该配置修复重复验证已通过的 batch1 protected-update 核心，除非需要额外验证 batch4 显存。
