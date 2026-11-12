@@ -4,7 +4,9 @@ from __future__ import print_function
 
 import argparse
 import math
+import random
 
+import numpy as np
 import torch
 
 from detection.config import cfg
@@ -87,6 +89,16 @@ def main():
     parser.add_argument("opts", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
+    expected_checkpoint = (
+        "/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/"
+        "s0_dbias_color_E2_zdh/E2/best.pth"
+    )
+    if args.checkpoint != expected_checkpoint:
+        raise RuntimeError(
+            "B1 audit only accepts the fixed E2 baseline checkpoint: %s"
+            % expected_checkpoint
+        )
+
     cfg.merge_from_file(args.config_file)
     cfg.merge_from_list(args.opts)
     cfg.freeze()
@@ -98,6 +110,8 @@ def main():
     device = torch.device(
         "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
     )
+    random.seed(20261112)
+    np.random.seed(20261112)
     torch.manual_seed(20261112)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(20261112)
