@@ -301,9 +301,6 @@ def main():
     consistency_gate_gradient, consistency_gradient_details = (
         gradient_diagnostics(consistency_only, gate_named)
     )
-    if consistency_gate_gradient <= 0:
-        failures.append("consistency loss alone has no gate gradient")
-
     optimizer.zero_grad()
     object_losses, _ = b1_forward(
         model, images, img_metas, targets, degraded
@@ -331,6 +328,24 @@ def main():
         float(cfg.SELECTIVE_AHDR.CONS_WEIGHT),
         gate_named,
     )
+    consistency_has_none = any(
+        item["is_none"] for item in consistency_gradient_details.values()
+    )
+    selected_reference_exact = torch.equal(
+        selected_capture.detach(), clean_reference.detach()
+    )
+    if consistency_has_none:
+        failures.append(
+            "consistency autograd path is disconnected from gate parameters"
+        )
+    elif consistency_gate_gradient <= 0:
+        if not (
+                selected_reference_exact
+                and perturbation["gradient_norm"] > 0):
+            failures.append(
+                "consistency gradient is zero without exact optimum proof "
+                "and a successful audit-only perturbation"
+            )
 
     frozen_modules = {
         "backbone_0": model.teacher.backbone_0,
@@ -482,6 +497,17 @@ def main():
           float(selected_reference_diff.max().item()))
     print("consistency loss value =",
           float(consistency_only.detach().item()))
+    print("selected exactly equals clean_reference =",
+          selected_reference_exact)
+    print("consistency gradient classification =", (
+        "disconnected"
+        if consistency_has_none
+        else (
+            "numerical_zero_at_exact_optimum"
+            if consistency_gate_gradient <= 0 and selected_reference_exact
+            else "nonzero"
+        )
+    ))
     print("gate mean/std/min/max =", (
         float(gate_capture.detach().mean().item()),
         float(gate_capture.detach().std().item()),
