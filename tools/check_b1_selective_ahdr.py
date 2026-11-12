@@ -205,6 +205,17 @@ def main():
     if consistency_gate_gradient <= 0:
         raise RuntimeError("consistency loss alone has no gate gradient")
 
+    optimizer.zero_grad()
+    object_losses, _ = b1_forward(
+        model, images, img_metas, targets, degraded
+    )
+    object_consistency_only = object_losses["b1_object_consistency"]
+    object_consistency_gate_gradient = gradient_norm(
+        object_consistency_only, gate_list
+    )
+    if object_consistency_gate_gradient <= 0:
+        raise RuntimeError("object consistency loss alone has no gate gradient")
+
     frozen_modules = {
         "backbone_0": model.teacher.backbone_0,
         "backbone_1": model.teacher.backbone_1,
@@ -343,6 +354,8 @@ def main():
     print("weighted auxiliary total =", float(auxiliary.detach().item()))
     print("detection-only gate gradient norm =", detection_gate_gradient)
     print("consistency-only gate gradient norm =", consistency_gate_gradient)
+    print("object-consistency-only gate gradient norm =",
+          object_consistency_gate_gradient)
     print("total gate gradient norm =", gate_gradient)
     print("new-anchor raw gradient max =", raw_new_gradient)
     print("old-anchor gradient after mask =", old_gradient)
@@ -350,6 +363,20 @@ def main():
     print("new-anchor parameter delta =", new_delta)
     print("gate parameter delta =", gate_delta)
     print("frozen module delta =", frozen_delta)
+    object_mask = forward_outputs["b1"]["object_mask"].detach()
+    gt_example = (
+        targets[0]["boxes"][0].detach().cpu().tolist()
+        if len(targets) and targets[0]["boxes"].numel() else None
+    )
+    print("source img_shape =", [meta["img_shape"] for meta in img_metas])
+    print("selected feature shape =", list(
+        forward_outputs["b1"]["legacy_feature"].shape
+    ))
+    print("source GT box example =", gt_example)
+    print("object mask shape =", list(object_mask.shape))
+    print("object mask coverage =", [
+        float(mask.sum().item()) for mask in object_mask
+    ])
     print("gate min/max/mean/std =", (
         float(gate.min().item()), float(gate.max().item()),
         float(gate.mean().item()), float(gate.std().item()),
