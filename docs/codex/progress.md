@@ -102,3 +102,12 @@
 - 非交互 CPU smoke 通过：gate 参数量 449、初始 baseline max_abs_diff=0、tiny GT 至少 1 cell、NaN fail-fast、A3 old-channel mask/restore、gate/new-anchor 更新及 shared conv 冻结。
 - 直接调用 11 个 small-anchor/A3/A4/B1 单元测试函数全部通过。
 - 本机 pytest runner 在启动/插件阶段 45 秒无输出，已终止；未将该环境问题记为测试通过。服务器仍需运行正式 pytest 与 GPU audit。
+
+
+## 2026-11-12 B1 首次 GPU audit forward 修复
+
+- 首次服务器 audit 已确认 checkpoint expansion、38924/283205732 参数计数、449 gate 参数与 optimizer 白名单正确。
+- forward 失败根因是训练态 OHDR 返回 `(Tensor, aux_dict)`，而 B1 六步 legacy 代码把整个 tuple 乘以 0.6。
+- 已最小修复为严格提取已验证的 restored Tensor，不切换 render_net 模式、不修改 OHDR 返回契约及 E2/A3/A4 默认路径。
+- audit 新增 object-consistency 单独 gate gradient 检查，并打印真实 source 的 img_shape、feature shape、GT 示例和 mask coverage。
+- 新增非方形 width/height 精确投影、clipping、tiny-box 及 OHDR tuple/Tensor 契约测试；13 个非交互单元测试通过。
