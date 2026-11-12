@@ -8,6 +8,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def extract_ahdr_render_tensor(result):
+    """Parse OHDR.forward without changing its train/eval return contract."""
+    if torch.is_tensor(result):
+        return result
+    if (
+            isinstance(result, (tuple, list))
+            and len(result) == 2
+            and torch.is_tensor(result[0])
+            and isinstance(result[1], dict)):
+        return result[0]
+    raise TypeError(
+        "unexpected AHDR return contract: %s" % type(result).__name__
+    )
+
+
 class SelectiveAHDRGate(nn.Module):
     """Spatial gate over base and restoration delta.
 
