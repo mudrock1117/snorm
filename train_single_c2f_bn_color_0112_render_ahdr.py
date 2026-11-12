@@ -29,6 +29,12 @@ from detection.engine.eval import evaluation
 from detection.modeling.build import build_detectors
 from detection.utils import dist_utils
 from diagnostics.small_anchor import load_small_anchor_checkpoint
+from diagnostics.b1_protected import (
+    B1_GATE_LR,
+    B1_OUTPUT_LR,
+    audit_b1_trainable_parameters,
+    configure_b1_trainable_parameters,
+)
 from diagnostics.a3_protected import (
     ProtectedSmallAnchorStep,
     A4_OUTPUT_LR,
@@ -211,7 +217,65 @@ a3_controller=None):
                 torch.cuda.empty_cache()
             else:
                 _exp_loop = os.environ.get('SNORM_EXPERIMENT', 'E0')
-                if _exp_loop in ('E1', 'E2', 'A3', 'A4'):
+                if _exp_loop == 'B1':
+                    loss_dict_det, outputs_det = model_det(
+                        images, img_metas, s_targets,
+                        mode_training=13,
+                        step_iter=global_step,
+                        stpd_images=tr_images,
+                        is_update=False,
+                    )
+                    det_only = sum(
+                        value for key, value in loss_dict_det.items()
+                        if not key.startswith('b1_')
+                    )
+                    total_loss = sum(list(loss_dict_det.values()))
+                    total_loss.backward()
+                    metric_logger.update(det_loss_s=total_loss)
+                    _log_interval = int(det_cfg.SELECTIVE_AHDR.LOG_INTERVAL)
+                    if global_step % max(1, _log_interval) == 0:
+                        _b1 = outputs_det['b1']
+                        _gate = _b1['gate'].detach()
+                        _coef = _b1['coefficient'].detach()
+                        _inner = (
+                            model_det.module if hasattr(model_det, 'module')
+                            else model_det
+                        )
+                        _gate_grad_sq = 0.0
+                        for _parameter in (
+                                _inner.teacher.selective_ahdr_gate.parameters()):
+                            if _parameter.grad is not None:
+                                _gate_grad_sq += float(
+                                    _parameter.grad.detach().pow(2).sum().item()
+                                )
+                        _loss_values = {
+                            key: float(value.detach().item())
+                            for key, value in loss_dict_det.items()
+                        }
+                        print('[B1 TRAIN] step={} total={:.6f} det={:.6f}'.format(
+                            global_step, float(total_loss.detach().item()),
+                            float(det_only.detach().item())
+                        ))
+                        print('[B1 TRAIN] losses =', _loss_values)
+                        print('[B1 TRAIN] gate mean/std/min/max =', (
+                            float(_gate.mean().item()),
+                            float(_gate.std().item()),
+                            float(_gate.min().item()),
+                            float(_gate.max().item()),
+                        ))
+                        print('[B1 TRAIN] alpha*M mean/std =', (
+                            float(_coef.mean().item()),
+                            float(_coef.std().item()),
+                        ))
+                        print('[B1 TRAIN] gate grad norm =',
+                              math.sqrt(_gate_grad_sq))
+                        print('[B1 TRAIN] group LRs =', [
+                            (group.get('name'), group['lr'])
+                            for group in optimizers[0].param_groups
+                        ])
+                    del total_loss, det_only, loss_dict_det, outputs_det
+                    torch.cuda.empty_cache()
+                elif _exp_loop in ('E1', 'E2', 'A3', 'A4'):
                     loss_dict_det, _ = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, \
                                                 is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
                     det_loss_det = sum(list(loss_dict_det.values()))
@@ -333,7 +397,7 @@ a3_controller=None):
     for name, m in model_inner.named_modules():
         if type(m).__name__ == 'SNorm':
             snorm_modules.append((name, m))
-    _a3_active = os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A3', 'A4')
+    _a3_active = os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A3', 'A4', 'B1')
     for name, m in snorm_modules:
         if _a3_active:
             continue
@@ -355,7 +419,7 @@ a3_controller=None):
         else:
             model_det.teacher.proj_norm.compute_norm_parameters(device=device)
     elif _a3_active:
-        print('[A3/A4] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
+        print('[A3/A4/B1] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
 
 def main(det_cfg, args):
     print('----num_workers:', det_cfg.DATALOADER.NUM_WORKERS)
@@ -400,7 +464,9 @@ def main(det_cfg, args):
         _git_sha = 'unavailable'
     print('[EXPERIMENT START]')
     print('experiment =', (
-        'A4_PROTECTED_RPN'
+        'B1_PROTECTED_SMALLANCHOR_SELECTIVE_AHDR'
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1'
+        else 'A4_PROTECTED_RPN'
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A4'
         else 'A3_PROTECTED_SMALLANCHOR'
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A3'
@@ -439,7 +505,7 @@ def main(det_cfg, args):
     work_dir = det_cfg.WORK_DIR
     _exp_wd = os.environ.get('SNORM_EXPERIMENT', 'E0')
     if _exp_wd != 'E0':
-        _work_suffix = 'E2' if _exp_wd in ('A3', 'A4') else _exp_wd
+        _work_suffix = 'E2' if _exp_wd in ('A3', 'A4', 'B1') else _exp_wd
         work_dir = os.path.join(work_dir, _work_suffix)
         os.makedirs(work_dir, exist_ok=True)
         print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
@@ -464,7 +530,33 @@ def main(det_cfg, args):
               _rn = _proj.render_net
               _sp = getattr(_proj, 'sigma_weight_pred', None)
               def _count(_params): return sum(p.numel() for p in _params)
-              if _exp == 'A4':
+              if _exp == 'B1':
+                  if not _is_small_anchor_a:
+                      raise RuntimeError('B1 requires anchor sizes (32,64,128,256,512)')
+                  if not bool(det_cfg.SELECTIVE_AHDR.ENABLED):
+                      raise RuntimeError('B1 requires SELECTIVE_AHDR.ENABLED=True')
+                  if float(_base_lr) != float(B1_OUTPUT_LR):
+                      raise RuntimeError(
+                          'B1 requires SOLVER.LR=%s; got %s'
+                          % (B1_OUTPUT_LR, _base_lr)
+                      )
+                  _b1_outputs, _b1_gate, _b1_gate_names = (
+                      configure_b1_trainable_parameters(model_without_ddp)
+                  )
+                  model_paramters += [{
+                      'params': _b1_outputs,
+                      'lr': B1_OUTPUT_LR,
+                      'name': 'b1_new_32_anchor_output',
+                  }, {
+                      'params': _b1_gate,
+                      'lr': B1_GATE_LR,
+                      'name': 'b1_selective_ahdr_gate',
+                  }]
+                  a3_controller = ProtectedSmallAnchorStep(
+                      model_without_ddp,
+                      extra_trainable_names=_b1_gate_names,
+                  )
+              elif _exp == 'A4':
                   if not _is_small_anchor_a:
                       raise RuntimeError('A4 requires anchor sizes (32,64,128,256,512)')
                   if float(_base_lr) != float(A4_OUTPUT_LR):
@@ -561,13 +653,15 @@ def main(det_cfg, args):
                   ))
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
           if a3_controller is not None:
-              if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A4':
+              if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1':
+                  audit_b1_trainable_parameters(model_without_ddp, optimizer_model)
+              elif os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A4':
                   audit_a4_trainable_parameters(model_without_ddp, optimizer_model)
               else:
                   audit_a3_trainable_parameters(model_without_ddp, optimizer_model)
           _total_epochs = det_cfg.SOLVER.EPOCHS
           _t_max = max(1, _total_epochs * len(train_loader))
-          if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A4':
+          if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A4', 'B1'):
               _a4_min_factor = 1e-6 / A4_OUTPUT_LR
               def _a4_lr_factor(_step):
                   _progress = min(float(_step), float(_t_max)) / float(_t_max)
