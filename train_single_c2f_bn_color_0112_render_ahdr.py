@@ -228,11 +228,25 @@ a3_controller=None):
                         value for key, value in loss_dict_det.items()
                         if not key.startswith('b1_')
                     )
+                    _required_detection_losses = {
+                        'rpn_cls_loss_w', 'rpn_reg_loss_w',
+                        'rcnn_cls_loss_w', 'rcnn_reg_loss_w',
+                    }
+                    _missing_detection_losses = sorted(
+                        _required_detection_losses - set(loss_dict_det.keys())
+                    )
+                    if _missing_detection_losses:
+                        raise RuntimeError(
+                            'B1 source detection losses missing: %s'
+                            % _missing_detection_losses
+                        )
                     total_loss = sum(list(loss_dict_det.values()))
                     total_loss.backward()
                     metric_logger.update(det_loss_s=total_loss)
                     _log_interval = int(det_cfg.SELECTIVE_AHDR.LOG_INTERVAL)
-                    if global_step % max(1, _log_interval) == 0:
+                    if (
+                            dist_utils.is_main_process()
+                            and global_step % max(1, _log_interval) == 0):
                         _b1 = outputs_det['b1']
                         _gate = _b1['gate'].detach()
                         _coef = _b1['coefficient'].detach()
@@ -379,11 +393,46 @@ a3_controller=None):
                 writer.add_scalar('lr_model', optimizers[0].param_groups[0]['lr'], global_step=global_step)
                 writer.add_scalar('LAMBDA', LAMBDA, global_step=global_step)
 
-        if global_step % (1000 // max(1, (dist_utils.get_world_size() // 2))) == 0 and test_func is not None:
+        _is_b1_ddp = (
+            os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1'
+            and dist_utils.get_world_size() > 1
+        )
+        if _is_b1_ddp:
+            _eval_steps_text = os.environ.get(
+                'B1_DDP_EVAL_STEPS', '500,1000,1500,1650,2000'
+            )
+            _eval_steps = set(
+                int(value.strip())
+                for value in _eval_steps_text.split(',')
+                if value.strip()
+            )
+            _should_evaluate = global_step in _eval_steps
+        else:
+            _eval_interval = (
+                1000 // max(1, (dist_utils.get_world_size() // 2))
+            )
+            _should_evaluate = global_step % _eval_interval == 0
+        if _should_evaluate and test_func is not None:
+            if _is_b1_ddp:
+                save_func(
+                    'model_step_{:06d}.pth'.format(global_step),
+                    'pre-evaluation checkpoint at global step {}'.format(
+                        global_step
+                    ),
+                )
+                torch.distributed.barrier()
             updated = test_func()
             if updated:
                 save_func('best.pth', 'sum_mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
-            print('Best sum mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
+            if dist_utils.is_main_process():
+                print(
+                    '[B1 EVAL] step={} fog={:.4f} night={:.4f} sum={:.4f}'.format(
+                        global_step, current_foggy_mAP,
+                        current_night_mAP,
+                        current_foggy_mAP + current_night_mAP,
+                    )
+                )
+                print('Best sum mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
 
     if det_cfg.MODEL.MODE.TRAIN_PROCESS == 'S1' and det_cfg.MODEL.MODE.UPDATE_TEACHER_MARK and epoch >= 0:
         if hasattr(model_det, 'module'):
@@ -438,12 +487,25 @@ def main(det_cfg, args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model_det = build_detectors(det_cfg)
     model_det.to(device)
+
+    # DDP must observe the final B1 requires_grad whitelist when reducer hooks
+    # are constructed. The later optimizer setup repeats this idempotently.
+    if (
+            args.distributed
+            and os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1'):
+        configure_b1_trainable_parameters(model_det)
     
     model_without_ddp = model_det
     model_tran_without_ddp = None
     if args.distributed:
         print('--set distributed')
-        model_det = DistributedDataParallel(convert_sync_batchnorm(model_det), device_ids=[args.gpu], find_unused_parameters=True, broadcast_buffers=False)
+        model_det = DistributedDataParallel(
+            convert_sync_batchnorm(model_det),
+            device_ids=[args.gpu],
+            output_device=args.gpu,
+            find_unused_parameters=True,
+            broadcast_buffers=False,
+        )
        
         torch.autograd.set_detect_anomaly(True)
         torch.distributed.barrier()
