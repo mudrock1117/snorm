@@ -93,3 +93,12 @@
 - 训练入口和 audit 均硬性校验固定 E2 baseline checkpoint、clear-source-only 数据与 Fog/Night 测试协议。
 - 已通过所有修改文件的 Python AST 检查；聚焦 CPU smoke 验证 gate 449 参数、基线等价、tiny-box mask、旧通道零变化、gate/新通道更新及 shared conv 冻结。
 - 未执行 GPU audit、完整数据加载、正式训练或 VOC evaluation，未宣称精度提升。
+
+
+## 2026-11-12 B1 非交互兼容性复核
+
+- 清理了遗留交互式 Python REPL；后续检查全部使用自动退出命令。
+- 9 个 B1 相关 Python 文件通过 Python 3.6 grammar AST 检查。
+- 非交互 CPU smoke 通过：gate 参数量 449、初始 baseline max_abs_diff=0、tiny GT 至少 1 cell、NaN fail-fast、A3 old-channel mask/restore、gate/new-anchor 更新及 shared conv 冻结。
+- 直接调用 11 个 small-anchor/A3/A4/B1 单元测试函数全部通过。
+- 本机 pytest runner 在启动/插件阶段 45 秒无输出，已终止；未将该环境问题记为测试通过。服务器仍需运行正式 pytest 与 GPU audit。
