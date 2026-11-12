@@ -36,6 +36,7 @@ from detection.modeling.norm.script_bp import select_rect_weight_w_prob, class_l
 select_rect_weight_w_prob_1030, generate_moe_mask_v4, class_hl_loss, class_loss_v2
 
 from detection.modeling.norm.dice_loss import DiceLoss
+from detection.modeling.norm.selective_ahdr import selective_consistency_losses
 from detection.modeling.ModuleSet import ModuleSet
 #from detection.modeling.unet.lib_render import SSIMLoss
 from detection.modeling.unet.ssim import SSIM, mse_loss, edge_loss, tv_loss, patch_consistency_loss
@@ -163,6 +164,69 @@ class FasterRCNN(nn.Module):
                     loss_dict.update({key+'_w':value})
                 for key, value in output_teacher['box_losses_w'].items():
                     loss_dict.update({key+'_w':value})
+
+            ########B1 protected detector + Selective-AHDR########
+            elif mode_training == 13:
+                if not bool(self.cfg.SELECTIVE_AHDR.ENABLED):
+                    raise RuntimeError("mode_training=13 requires SELECTIVE_AHDR.ENABLED")
+                if stpd_images is None:
+                    raise RuntimeError(
+                        "B1 requires clean tc_images and synthetic degraded stpd_images"
+                    )
+                with torch.no_grad():
+                    clean_output = self.teacher(
+                        tc_images, img_metas, targets_, mode=8, moe_mode=moe_mode,
+                        update_norm_p=False, is_update=False,
+                    )
+                    clean_reference = clean_output["features_norm"].detach()
+
+                degraded_output = self.teacher(
+                    stpd_images, img_metas, targets_, mode=5, moe_mode=moe_mode,
+                    update_norm_p=False, is_update=False,
+                )
+                for key, value in degraded_output["rpn_losses_w"].items():
+                    loss_dict.update({key + "_w": value})
+                for key, value in degraded_output["box_losses_w"].items():
+                    loss_dict.update({key + "_w": value})
+
+                selective = degraded_output["feat_dict"]["selective"]
+                selected = degraded_output["features_norm"]
+                image_sizes = [meta["img_shape"] for meta in img_metas]
+                loss_cons, loss_obj, loss_gate, object_mask = (
+                    selective_consistency_losses(
+                        selected,
+                        clean_reference,
+                        selective["gate"],
+                        targets_,
+                        image_sizes=image_sizes,
+                    )
+                )
+                cons_weight = float(self.cfg.SELECTIVE_AHDR.CONS_WEIGHT)
+                obj_weight = float(self.cfg.SELECTIVE_AHDR.OBJ_CONS_WEIGHT)
+                gate_weight = float(self.cfg.SELECTIVE_AHDR.GATE_REG_WEIGHT)
+                loss_dict["b1_consistency"] = cons_weight * loss_cons
+                loss_dict["b1_object_consistency"] = obj_weight * loss_obj
+                loss_dict["b1_gate_regularization"] = gate_weight * loss_gate
+                outputs["b1"] = {
+                    "raw_consistency": loss_cons.detach(),
+                    "raw_object_consistency": loss_obj.detach(),
+                    "raw_gate_regularization": loss_gate.detach(),
+                    "weighted_consistency": (
+                        cons_weight * loss_cons
+                    ).detach(),
+                    "weighted_object_consistency": (
+                        obj_weight * loss_obj
+                    ).detach(),
+                    "weighted_gate_regularization": (
+                        gate_weight * loss_gate
+                    ).detach(),
+                    "gate": selective["gate"],
+                    "coefficient": selective["coefficient"],
+                    "object_mask": object_mask,
+                    "initialization_diff": degraded_output["feat_dict"][
+                        "initialization_diff"
+                    ],
+                }
 
             ########detection + e-net########
             elif mode_training == 1:
