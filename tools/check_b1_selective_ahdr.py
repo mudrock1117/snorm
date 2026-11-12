@@ -4,6 +4,7 @@ from __future__ import print_function
 
 import argparse
 import math
+import os
 import random
 
 import numpy as np
@@ -142,6 +143,35 @@ def b1_forward_with_capture(model, images, img_metas, targets, degraded):
         faster_rcnn_module.selective_consistency_losses = original_loss
         handle.remove()
     return losses, outputs, captured
+
+
+def report_stage(stage_name, model, payload):
+    print("[B1 AUDIT STAGE]", stage_name)
+    print("model.training =", bool(model.training))
+    print("teacher.training =", bool(model.teacher.training))
+    print("selective_enabled =", bool(model.teacher.selective_ahdr_enabled))
+    print("SNORM_EXPERIMENT =", os.environ.get("SNORM_EXPERIMENT"))
+    print("b1_payload_present =", payload is not None)
+
+
+def run_b1_diagnostic_forward(stage_name, model, images, img_metas,
+                              targets, degraded, failures, capture=False):
+    if capture:
+        losses, outputs, captured = b1_forward_with_capture(
+            model, images, img_metas, targets, degraded
+        )
+    else:
+        losses, outputs = b1_forward(
+            model, images, img_metas, targets, degraded
+        )
+        captured = None
+    payload = outputs.get("b1") if isinstance(outputs, dict) else None
+    report_stage(stage_name, model, payload)
+    if payload is None:
+        failures.append(
+            "%s did not produce B1 diagnostic payload" % stage_name
+        )
+    return losses, outputs, payload, captured
 
 
 def perturbation_consistency_gradient(model, captured, consistency_weight,
