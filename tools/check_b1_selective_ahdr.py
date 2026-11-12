@@ -439,9 +439,13 @@ def main():
             else BBOX_NEW_CHANNELS
         )
         new_before[name] = parameter.detach()[list(channels)].clone()
-        raw_new_gradient[name] = float(
-            parameter.grad.detach()[list(channels)].abs().max().item()
-        )
+        if parameter.grad is None:
+            raw_new_gradient[name] = 0.0
+            failures.append("B1 new-anchor gradient is None: %s" % name)
+        else:
+            raw_new_gradient[name] = float(
+                parameter.grad.detach()[list(channels)].abs().max().item()
+            )
     if max(raw_new_gradient.values()) <= 0:
         failures.append("B1 total loss has no new-anchor gradient")
 
@@ -456,11 +460,17 @@ def main():
             parameter.size(0), dtype=torch.bool, device=parameter.device
         )
         mask[list(channels)] = False
-        old_gradient[name] = float(
-            parameter.grad.detach()[mask].abs().max().item()
-        )
-        if old_gradient[name] != 0:
-            failures.append("B1 old-anchor gradient is nonzero: %s" % name)
+        if parameter.grad is None:
+            old_gradient[name] = None
+            failures.append("B1 protected output gradient is None: %s" % name)
+        else:
+            old_gradient[name] = float(
+                parameter.grad.detach()[mask].abs().max().item()
+            )
+            if old_gradient[name] != 0:
+                failures.append(
+                    "B1 old-anchor gradient is nonzero: %s" % name
+                )
 
     gate = None
     coefficient = None
