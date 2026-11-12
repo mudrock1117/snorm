@@ -6,6 +6,7 @@ import argparse
 import math
 import os
 import random
+import sys
 
 import numpy as np
 import torch
@@ -624,4 +625,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
