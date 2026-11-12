@@ -99,6 +99,14 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument("--dist-url", default="env://")
+    parser.add_argument(
+        "--execution-batch-size", type=int, default=1,
+        help="lightweight protected-update audit batch per rank",
+    )
+    parser.add_argument(
+        "--config-only", action="store_true",
+        help="validate formal config/DataLoader semantics without model forward",
+    )
     parser.add_argument("opts", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -131,22 +139,93 @@ def main():
     torch.cuda.manual_seed_all(seed + rank)
 
     device = torch.device("cuda:%d" % args.gpu)
+    formal_batch_size = int(cfg.SOLVER.BATCH_SIZE)
+    execution_batch_size = (
+        formal_batch_size if args.config_only
+        else int(args.execution_batch_size)
+    )
+    if formal_batch_size != 4:
+        raise RuntimeError(
+            "B1 DDP formal config must use per-rank batch 4; got %s"
+            % formal_batch_size
+        )
+    if execution_batch_size <= 0:
+        raise ValueError("execution batch size must be positive")
     loader = build_data_loaders(
         cfg.DATASETS.TRAINS,
         transforms=cfg.INPUT.TRANSFORMS_TRAIN,
         is_train=True,
         distributed=True,
-        batch_size=cfg.SOLVER.BATCH_SIZE,
+        batch_size=execution_batch_size,
         num_workers=0,
         shuffle=False,
     )
     sampler = loader.batch_sampler.sampler
     sampler.set_epoch(0)
     sampler_indices = list(iter(sampler))
-    local_index_head = sampler_indices[:int(cfg.SOLVER.BATCH_SIZE)]
-    images, img_metas, targets, degraded = move_batch(
-        next(iter(loader)), device
-    )
+    local_index_head = sampler_indices[:execution_batch_size]
+    raw_batch = next(iter(loader))
+    input_batch_dimension = int(raw_batch[0].size(0))
+    loader_batch_size = int(loader.batch_sampler.batch_size)
+    samples_per_rank = len(sampler)
+    formal_steps_per_epoch = int(math.ceil(
+        float(samples_per_rank) / float(formal_batch_size)
+    ))
+    execution_steps_per_epoch = len(loader)
+
+    config_result = {
+        "rank": rank,
+        "formal_batch_size": formal_batch_size,
+        "loader_batch_size": loader_batch_size,
+        "input_batch_dimension": input_batch_dimension,
+        "samples_per_rank": samples_per_rank,
+        "formal_steps_per_epoch": formal_steps_per_epoch,
+        "execution_steps_per_epoch": execution_steps_per_epoch,
+        "sampler_index_head": local_index_head,
+    }
+    if args.config_only:
+        gathered_config = all_rank_results(config_result)
+        config_failures = []
+        if rank == 0:
+            for result in gathered_config:
+                if result["formal_batch_size"] != 4:
+                    config_failures.append("formal batch is not 4")
+                if result["loader_batch_size"] != 4:
+                    config_failures.append("DataLoader batch is not 4")
+                if result["input_batch_dimension"] != 4:
+                    config_failures.append("input tensor batch is not 4")
+                if result["samples_per_rank"] != 6440:
+                    config_failures.append("samples/rank is not 6440")
+                if result["formal_steps_per_epoch"] != 1610:
+                    config_failures.append("formal steps/epoch is not 1610")
+            print("[B1 DDP CONFIG AUDIT]")
+            print("cfg.SOLVER.BATCH_SIZE =", formal_batch_size)
+            print("DataLoader BatchSampler batch_size =", [
+                item["loader_batch_size"] for item in gathered_config
+            ])
+            print("input tensor batch dimension =", [
+                item["input_batch_dimension"] for item in gathered_config
+            ])
+            print("dataset size =", len(loader.dataset))
+            print("DistributedSampler samples/rank =", [
+                item["samples_per_rank"] for item in gathered_config
+            ])
+            print("formal global batch size =", formal_batch_size * world_size)
+            print("formal optimizer steps/epoch =", formal_steps_per_epoch)
+            if config_failures:
+                print("[B1 DDP CONFIG AUDIT FAIL]")
+                print("failure_reasons =", config_failures)
+            else:
+                print("[B1 DDP CONFIG AUDIT PASS]")
+                print("PASS")
+        failed = torch.tensor(
+            [1 if rank == 0 and config_failures else 0],
+            device=device, dtype=torch.int32,
+        )
+        dist.all_reduce(failed, op=dist.ReduceOp.MAX)
+        return int(failed.item())
+
+    images, img_metas, targets, degraded = move_batch(raw_batch, device)
     local_batch = int(images.size(0))
 
     model = build_detectors(cfg).to(device)
@@ -318,7 +397,12 @@ def main():
         "local_rank": args.gpu,
         "device": str(device),
         "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-        "per_rank_batch": local_batch,
+        "formal_per_rank_batch": formal_batch_size,
+        "audit_execution_batch": local_batch,
+        "loader_batch_size": loader_batch_size,
+        "input_batch_dimension": input_batch_dimension,
+        "formal_steps_per_epoch": formal_steps_per_epoch,
+        "execution_steps_per_epoch": execution_steps_per_epoch,
         "sampler_index_head": local_index_head,
         "gate_gradient_norm": gate_gradient,
         "new_anchor_raw_gradient_max": raw_new_gradient,
@@ -365,9 +449,19 @@ def main():
              item["visible_devices"]) for item in gathered
         ])
         print("dataset size =", len(loader.dataset))
-        print("optimizer steps per epoch =", len(loader))
-        print("effective per-rank batch size =", local_batch)
-        print("global batch size =", local_batch * world_size)
+        print("cfg.SOLVER.BATCH_SIZE =", formal_batch_size)
+        print("DataLoader BatchSampler batch_size =", [
+            item["loader_batch_size"] for item in gathered
+        ])
+        print("input tensor batch dimension =", [
+            item["input_batch_dimension"] for item in gathered
+        ])
+        print("formal per-rank batch size =", formal_batch_size)
+        print("formal global batch size =", formal_batch_size * world_size)
+        print("formal optimizer steps per epoch =", formal_steps_per_epoch)
+        print("audit execution batch per rank =", local_batch)
+        print("audit execution global batch =", local_batch * world_size)
+        print("audit execution steps per epoch =", len(loader))
         print("sampler first-batch indices =", [
             item["sampler_index_head"] for item in gathered
         ])
