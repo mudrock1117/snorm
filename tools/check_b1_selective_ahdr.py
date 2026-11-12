@@ -8,10 +8,12 @@ import random
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from detection.config import cfg
 from detection.data.build import build_data_loaders
 from detection.modeling.build import build_detectors
+from detection.modeling import faster_rcnn as faster_rcnn_module
 from diagnostics.a3_protected import (
     A3_TRAINABLE_NAMES,
     BBOX_NEW_CHANNELS,
@@ -40,15 +42,42 @@ def module_max_delta(module, before):
     return maximum
 
 
-def gradient_norm(loss, parameters):
+def gradient_diagnostics(loss, named_parameters):
+    """Return per-parameter evidence; keep None distinct from exact zero."""
+    parameters = [parameter for _, parameter in named_parameters]
     gradients = torch.autograd.grad(
         loss, parameters, allow_unused=True, retain_graph=False
     )
+    details = {}
     squared = 0.0
-    for gradient in gradients:
-        if gradient is not None:
-            squared += float(gradient.detach().pow(2).sum().item())
-    return math.sqrt(squared)
+    for (name, _), gradient in zip(named_parameters, gradients):
+        if gradient is None:
+            details[name] = {
+                "is_none": True,
+                "abs_mean": None,
+                "abs_max": None,
+                "norm": None,
+            }
+            continue
+        detached = gradient.detach()
+        norm = float(detached.pow(2).sum().sqrt().item())
+        details[name] = {
+            "is_none": False,
+            "abs_mean": float(detached.abs().mean().item()),
+            "abs_max": float(detached.abs().max().item()),
+            "norm": norm,
+        }
+        squared += norm * norm
+    return math.sqrt(squared), details
+
+
+def tensor_autograd_info(tensor):
+    return {
+        "requires_grad": bool(tensor.requires_grad),
+        "grad_fn": (
+            type(tensor.grad_fn).__name__ if tensor.grad_fn is not None else None
+        ),
+    }
 
 
 def selected_delta(parameter, before, channels):
@@ -78,6 +107,72 @@ def b1_forward(model, images, img_metas, targets, degraded):
         stpd_images=degraded,
         is_update=False,
     )
+
+
+def b1_forward_with_capture(model, images, img_metas, targets, degraded):
+    """Capture the real mode-13 tensors without changing its loss."""
+    captured = {}
+    gate_module = model.teacher.selective_ahdr_gate
+
+    def gate_hook(module, inputs, output):
+        captured["gate_base"] = inputs[0]
+        captured["gate_restored"] = inputs[1]
+        captured["gate_selected"] = output[0]
+        captured["gate_output"] = output[1]
+
+    original_loss = faster_rcnn_module.selective_consistency_losses
+
+    def loss_wrapper(selected, clean_reference, gate, loss_targets,
+                     image_sizes=None):
+        captured["selected"] = selected
+        captured["clean_reference"] = clean_reference
+        captured["loss_gate"] = gate
+        return original_loss(
+            selected, clean_reference, gate, loss_targets,
+            image_sizes=image_sizes,
+        )
+
+    handle = gate_module.register_forward_hook(gate_hook)
+    faster_rcnn_module.selective_consistency_losses = loss_wrapper
+    try:
+        losses, outputs = b1_forward(
+            model, images, img_metas, targets, degraded
+        )
+    finally:
+        faster_rcnn_module.selective_consistency_losses = original_loss
+        handle.remove()
+    return losses, outputs, captured
+
+
+def perturbation_consistency_gradient(model, captured, consistency_weight,
+                                      named_gate_parameters):
+    """Audit-only off-optimum check; restores the formal gate bias exactly."""
+    gate_module = model.teacher.selective_ahdr_gate
+    bias = gate_module.predictor.bias
+    old_bias = bias.detach().clone()
+    try:
+        with torch.no_grad():
+            bias.add_(0.2)
+        selected, info = gate_module(
+            captured["gate_base"].detach(),
+            captured["gate_restored"].detach(),
+        )
+        loss = float(consistency_weight) * F.smooth_l1_loss(
+            selected, captured["clean_reference"].detach()
+        )
+        total, details = gradient_diagnostics(loss, named_gate_parameters)
+        return {
+            "loss": float(loss.detach().item()),
+            "gradient_norm": total,
+            "gradient_details": details,
+            "gate_mean": float(info["gate"].detach().mean().item()),
+            "coefficient_mean": float(
+                info["coefficient"].detach().mean().item()
+            ),
+        }
+    finally:
+        with torch.no_grad():
+            bias.copy_(old_bias)
 
 
 def main():
@@ -180,7 +275,9 @@ def main():
     )
     model.train()
 
-    gate_list = list(model.teacher.selective_ahdr_gate.parameters())
+    gate_named = list(model.teacher.selective_ahdr_gate.named_parameters())
+    gate_list = [parameter for _, parameter in gate_named]
+    failures = []
 
     optimizer.zero_grad()
     detection_losses, _ = b1_forward(
@@ -190,31 +287,50 @@ def main():
         value for key, value in detection_losses.items()
         if not key.startswith("b1_")
     )
-    detection_gate_gradient = gradient_norm(detection_only, gate_list)
+    detection_gate_gradient, detection_gradient_details = (
+        gradient_diagnostics(detection_only, gate_named)
+    )
     if detection_gate_gradient <= 0:
-        raise RuntimeError("detection loss alone has no gate gradient")
+        failures.append("detection loss alone has no gate gradient")
 
     optimizer.zero_grad()
-    consistency_losses, _ = b1_forward(
+    consistency_losses, _, consistency_capture = b1_forward_with_capture(
         model, images, img_metas, targets, degraded
     )
     consistency_only = consistency_losses["b1_consistency"]
-    consistency_gate_gradient = gradient_norm(
-        consistency_only, gate_list
+    consistency_gate_gradient, consistency_gradient_details = (
+        gradient_diagnostics(consistency_only, gate_named)
     )
     if consistency_gate_gradient <= 0:
-        raise RuntimeError("consistency loss alone has no gate gradient")
+        failures.append("consistency loss alone has no gate gradient")
 
     optimizer.zero_grad()
     object_losses, _ = b1_forward(
         model, images, img_metas, targets, degraded
     )
     object_consistency_only = object_losses["b1_object_consistency"]
-    object_consistency_gate_gradient = gradient_norm(
-        object_consistency_only, gate_list
+    object_consistency_gate_gradient, object_gradient_details = (
+        gradient_diagnostics(object_consistency_only, gate_named)
     )
     if object_consistency_gate_gradient <= 0:
-        raise RuntimeError("object consistency loss alone has no gate gradient")
+        failures.append("object consistency loss alone has no gate gradient")
+
+    base = consistency_capture["gate_base"]
+    restored = consistency_capture["gate_restored"]
+    selected_capture = consistency_capture["selected"]
+    clean_reference = consistency_capture["clean_reference"]
+    gate_capture = consistency_capture["loss_gate"]
+    coefficient_capture = consistency_capture["gate_output"]["coefficient"]
+    base_restored_diff = (base - restored).detach().abs()
+    selected_reference_diff = (
+        selected_capture - clean_reference
+    ).detach().abs()
+    perturbation = perturbation_consistency_gradient(
+        model,
+        consistency_capture,
+        float(cfg.SELECTIVE_AHDR.CONS_WEIGHT),
+        gate_named,
+    )
 
     frozen_modules = {
         "backbone_0": model.teacher.backbone_0,
@@ -255,7 +371,7 @@ def main():
             )
     gate_gradient = math.sqrt(gate_gradient_sq)
     if gate_gradient <= 0:
-        raise RuntimeError("B1 total loss has no gate gradient")
+        failures.append("B1 total loss has no gate gradient")
 
     named = dict(model.named_parameters())
     new_before = {}
@@ -271,7 +387,7 @@ def main():
             parameter.grad.detach()[list(channels)].abs().max().item()
         )
     if max(raw_new_gradient.values()) <= 0:
-        raise RuntimeError("B1 total loss has no new-anchor gradient")
+        failures.append("B1 total loss has no new-anchor gradient")
 
     protected = controller.before_step()
     old_gradient = {}
@@ -288,7 +404,7 @@ def main():
             parameter.grad.detach()[mask].abs().max().item()
         )
         if old_gradient[name] != 0:
-            raise RuntimeError("B1 old-anchor gradient is nonzero")
+            failures.append("B1 old-anchor gradient is nonzero: %s" % name)
 
     gate = forward_outputs["b1"]["gate"].detach()
     coefficient = forward_outputs["b1"]["coefficient"].detach()
@@ -305,7 +421,7 @@ def main():
         / (legacy.pow(2).sum().sqrt().item() + 1e-12)
     )
     if max_abs_diff > 1e-5:
-        raise RuntimeError(
+        failures.append(
             "B1 initialization does not preserve legacy output: max=%s"
             % max_abs_diff
         )
@@ -320,12 +436,12 @@ def main():
         )
         new_delta[name] = selected_delta(named[name], before, channels)
     if max(new_delta.values()) <= 0:
-        raise RuntimeError("B1 new-anchor outputs did not update")
+        failures.append("B1 new-anchor outputs did not update")
     gate_delta = module_max_delta(
         model.teacher.selective_ahdr_gate, gate_before
     )
     if gate_delta <= 0:
-        raise RuntimeError("B1 gate did not update")
+        failures.append("B1 gate did not update")
 
     frozen_delta = {
         name: module_max_delta(module, frozen_before[name])
@@ -333,7 +449,7 @@ def main():
     }
     for name, delta in frozen_delta.items():
         if delta != 0:
-            raise RuntimeError(
+            failures.append(
                 "B1 frozen module changed: %s delta=%s" % (name, delta)
             )
 
@@ -352,6 +468,37 @@ def main():
         key: float(value.detach().item()) for key, value in losses.items()
     })
     print("weighted auxiliary total =", float(auxiliary.detach().item()))
+    print("[B1 AUTOGRAD PATH]")
+    print("selected =", tensor_autograd_info(selected_capture))
+    print("gate =", tensor_autograd_info(gate_capture))
+    print("consistency loss =", tensor_autograd_info(consistency_only))
+    print("base/restored mean absolute difference =",
+          float(base_restored_diff.mean().item()))
+    print("base/restored max absolute difference =",
+          float(base_restored_diff.max().item()))
+    print("selected/clean_reference mean absolute difference =",
+          float(selected_reference_diff.mean().item()))
+    print("selected/clean_reference max absolute difference =",
+          float(selected_reference_diff.max().item()))
+    print("consistency loss value =",
+          float(consistency_only.detach().item()))
+    print("gate mean/std/min/max =", (
+        float(gate_capture.detach().mean().item()),
+        float(gate_capture.detach().std().item()),
+        float(gate_capture.detach().min().item()),
+        float(gate_capture.detach().max().item()),
+    ))
+    print("coefficient mean/std/min/max =", (
+        float(coefficient_capture.detach().mean().item()),
+        float(coefficient_capture.detach().std().item()),
+        float(coefficient_capture.detach().min().item()),
+        float(coefficient_capture.detach().max().item()),
+    ))
+    print("detection-only gate gradients =", detection_gradient_details)
+    print("consistency-only gate gradients =", consistency_gradient_details)
+    print("object-consistency-only gate gradients =",
+          object_gradient_details)
+    print("audit-only perturbed consistency =", perturbation)
     print("detection-only gate gradient norm =", detection_gate_gradient)
     print("consistency-only gate gradient norm =", consistency_gate_gradient)
     print("object-consistency-only gate gradient norm =",
@@ -389,6 +536,11 @@ def main():
     print("initialization relative_L2_diff =", relative_l2)
     if float(auxiliary.detach().item()) > float(detection_raw.detach().item()):
         print("WARNING: weighted auxiliary loss exceeds detection loss")
+    if failures:
+        print("[B1 AUDIT FAIL]")
+        for failure in failures:
+            print("FAIL:", failure)
+        raise RuntimeError("B1 audit failed: %s" % "; ".join(failures))
     print("[B1 AUDIT PASS]")
     print("PASS")
 
