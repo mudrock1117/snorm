@@ -162,7 +162,7 @@ def main():
             },
             {
                 "params": gate_parameters,
-                "lr": B1_GATE_LR,
+                "lr": float(cfg.SELECTIVE_AHDR.GATE_LR),
                 "name": "b1_selective_ahdr_gate",
             },
         ],
@@ -170,7 +170,12 @@ def main():
         betas=(0.9, 0.999),
         weight_decay=cfg.SOLVER.WEIGHT_DECAY,
     )
-    audit_info = audit_b1_trainable_parameters(model, optimizer)
+    audit_info = audit_b1_trainable_parameters(
+        model,
+        optimizer,
+        output_lr=B1_OUTPUT_LR,
+        gate_lr=float(cfg.SELECTIVE_AHDR.GATE_LR),
+    )
     controller = ProtectedSmallAnchorStep(
         model, extra_trainable_names=gate_names
     )
