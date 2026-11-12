@@ -462,6 +462,21 @@ def main(det_cfg, args):
         ).decode('utf-8').strip()
     except Exception:
         _git_sha = 'unavailable'
+    _b1_checkpoint = (
+        '/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/'
+        's0_dbias_color_E2_zdh/E2/best.pth'
+    )
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1':
+        if os.path.abspath(_load_path or '') != _b1_checkpoint:
+            raise RuntimeError(
+                'B1 must initialize from the fixed E2 baseline checkpoint: %s'
+                % _b1_checkpoint
+            )
+        if list(det_cfg.DATASETS.TRAINS) != ['bdd_daytime_clear_train']:
+            raise RuntimeError('B1 training must remain clear-source-only')
+        if list(det_cfg.DATASETS.TESTS) != [
+                'bdd_daytime_fog_test', 'bdd_night_sun_test']:
+            raise RuntimeError('B1 Fog/Night evaluation protocol changed')
     print('[EXPERIMENT START]')
     print('experiment =', (
         'B1_PROTECTED_SMALLANCHOR_SELECTIVE_AHDR'
