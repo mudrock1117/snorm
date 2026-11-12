@@ -40,3 +40,12 @@
 - `SELECTIVE_AHDR.ENABLED=False` 时不实例化 gate，旧配置、checkpoint state_dict 和 forward 行为不变。
 
 验证状态：Python 语法检查和聚焦 CPU smoke 已通过；真实数据、checkpoint、GPU audit 与训练尚未执行。
+
+
+## B1 三卡 DDP（2026-11-12）
+
+- `SOLVER.BATCH_SIZE` 直接传给每个 rank 的 BatchSampler，因此 DDP 配置值 4 表示 per-GPU 4、三卡 global batch 12。
+- 19318 张训练集经三卡 DistributedSampler 后每 rank 6440 个索引，batch 4 时每 epoch 1610 个 optimizer global steps。
+- B1 在 DDP 包装前固定 requires_grad whitelist；backward 返回后梯度已经 all-reduce，再执行 old-anchor mask → snapshot → optimizer.step → restore/state clear。
+- mode13 必须包含 clear-source GT 的四项 detection loss：rpn/rcnn cls/reg；Fog/Night 不参与训练。
+- LR 不随 global batch 放大：new-anchor 5e-5，Gate 1e-5。
