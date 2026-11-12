@@ -111,3 +111,12 @@
 - 已最小修复为严格提取已验证的 restored Tensor，不切换 render_net 模式、不修改 OHDR 返回契约及 E2/A3/A4 默认路径。
 - audit 新增 object-consistency 单独 gate gradient 检查，并打印真实 source 的 img_shape、feature shape、GT 示例和 mask coverage。
 - 新增非方形 width/height 精确投影、clipping、tiny-box 及 OHDR tuple/Tensor 契约测试；13 个非交互单元测试通过。
+
+
+### B1 第二次 GPU audit：consistency 梯度诊断（2026-11-12）
+
+- 第二次服务器 audit 已确认 AHDR tuple 解析修复生效；新的停止点是 consistency-only Gate 聚合梯度为零。
+- 旧 audit 无法区分 grad is None（断图）和存在但恰为零的梯度，也会在首个失败处提前退出。
+- 已改为捕获真实 mode-13 的 base/restored/selected/clean-reference/gate，逐 Gate 参数报告 autograd 与梯度数值，并统一汇总所有审计条件。
+- 增加仅用于 audit、执行后完整恢复 predictor bias 的 off-optimum 检查；正式 Gate init=0.5、alpha_max=1.2、loss 和训练路径均未修改。
+- 待服务器 GPU1 复核后，才能确定本次真实样本属于断图、数学最优点零梯度或其他数值零梯度。
