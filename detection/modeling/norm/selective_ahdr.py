@@ -79,7 +79,7 @@ class SelectiveAHDRGate(nn.Module):
 
 def project_source_boxes_to_mask(targets, feature_size, image_sizes=None,
                                  device=None, dtype=None):
-    """Project resized source GT boxes; every non-empty tiny box gets one cell."""
+    """Project source GT; image_sizes follow project img_shape=(width,height).\n\n    Every non-empty tiny box receives at least one feature cell.\n    """
     height, width = int(feature_size[0]), int(feature_size[1])
     if height <= 0 or width <= 0:
         raise ValueError("feature_size must be positive")
