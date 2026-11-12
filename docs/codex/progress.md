@@ -83,3 +83,13 @@
 - A3 的 backward 后 mask、旧通道快照、step 后恢复及 Adam state 清理被直接复用；shared conv 不做 mask。
 - 新增独立 A4 clear-source 配置、真实 RPN forward/loss GPU audit 和 CPU 单元测试；未修改检测 forward、AHDR/SNorm、ROI 或 evaluator。
 - 本地 CPU 保护机制 smoke 通过；GPU audit 和正式训练均未执行，待服务器 GPU1 验证。
+
+
+## 2026-11-12 B1 Selective-AHDR
+
+- 新增独立 B1 配置、449 参数空间 gate、source-only consistency/object consistency、严格训练白名单和 GPU audit。
+- 复用 A3 small-anchor expansion 与旧通道 mask/snapshot/restore/state-clear；B1 明确冻结 RPN shared conv，不采用 A4。
+- B1 初始化严格保持旧 `0.6` AHDR residual coefficient，并在 audit 中检查真实 source 输入的 mean/max/relative-L2 差异。
+- 训练入口和 audit 均硬性校验固定 E2 baseline checkpoint、clear-source-only 数据与 Fog/Night 测试协议。
+- 已通过所有修改文件的 Python AST 检查；聚焦 CPU smoke 验证 gate 449 参数、基线等价、tiny-box mask、旧通道零变化、gate/新通道更新及 shared conv 冻结。
+- 未执行 GPU audit、完整数据加载、正式训练或 VOC evaluation，未宣称精度提升。
