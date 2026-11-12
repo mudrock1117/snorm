@@ -472,6 +472,12 @@ def main(det_cfg, args):
                 'B1 must initialize from the fixed E2 baseline checkpoint: %s'
                 % _b1_checkpoint
             )
+        if os.environ.get('SNORM_ABLATION', 'full') != 'full':
+            raise RuntimeError('B1 requires the full six-step AHDR path')
+        if int(os.environ.get('SNORM_STEPS', '6')) != 6:
+            raise RuntimeError('B1 requires SNORM_STEPS=6')
+        if abs(float(os.environ.get('SNORM_RES_W', '0.6')) - 0.6) > 1e-12:
+            raise RuntimeError('B1 baseline preservation requires SNORM_RES_W=0.6')
         if list(det_cfg.DATASETS.TRAINS) != ['bdd_daytime_clear_train']:
             raise RuntimeError('B1 training must remain clear-source-only')
         if list(det_cfg.DATASETS.TESTS) != [
@@ -555,6 +561,7 @@ def main(det_cfg, args):
                           'B1 requires SOLVER.LR=%s; got %s'
                           % (B1_OUTPUT_LR, _base_lr)
                       )
+                  _b1_gate_lr = float(det_cfg.SELECTIVE_AHDR.GATE_LR)
                   _b1_outputs, _b1_gate, _b1_gate_names = (
                       configure_b1_trainable_parameters(model_without_ddp)
                   )
@@ -564,7 +571,7 @@ def main(det_cfg, args):
                       'name': 'b1_new_32_anchor_output',
                   }, {
                       'params': _b1_gate,
-                      'lr': B1_GATE_LR,
+                      'lr': _b1_gate_lr,
                       'name': 'b1_selective_ahdr_gate',
                   }]
                   a3_controller = ProtectedSmallAnchorStep(
@@ -669,7 +676,11 @@ def main(det_cfg, args):
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
           if a3_controller is not None:
               if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1':
-                  audit_b1_trainable_parameters(model_without_ddp, optimizer_model)
+                  audit_b1_trainable_parameters(
+                      model_without_ddp, optimizer_model,
+                      output_lr=B1_OUTPUT_LR,
+                      gate_lr=float(det_cfg.SELECTIVE_AHDR.GATE_LR),
+                  )
               elif os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A4':
                   audit_a4_trainable_parameters(model_without_ddp, optimizer_model)
               else:
