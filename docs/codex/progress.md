@@ -128,3 +128,11 @@
 - 已将 mode 13 的 outputs 显式路由到返回元数据；loss、forward 数值、优化器及参数保护均未改变。
 - audit 新增显式阶段契约和 model/teacher/selective/SNORM_EXPERIMENT/payload 状态日志；缺失 payload 会记录 failure reason，并在末尾统一返回失败状态。
 - 待服务器 GPU1 再次执行完整 audit。
+
+
+### B1 三卡 DDP 适配（2026-11-12）
+
+- 新增 batch4/rank 的独立三卡配置及 `tools/check_b1_ddp.py`；真实 GPU audit 待服务器执行。
+- 修复 DDP rank 绑定前错误预初始化 logical GPU0、DDP 包装前未固定 B1 requires_grad whitelist、rank0 日志和 evaluation 目录并发写风险。
+- 新增 global step 500/1000/1500/1650/2000 的独立 checkpoint 与 Fog/Night VOC evaluation 编排。
+- CPU sampler smoke 确认 19318 / 3 → 6440 samples/rank，batch4 → 1610 steps/epoch，global batch12。
