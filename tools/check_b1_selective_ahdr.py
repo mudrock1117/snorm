@@ -19,7 +19,6 @@ from diagnostics.a3_protected import (
     ProtectedSmallAnchorStep,
 )
 from diagnostics.b1_protected import (
-    B1_GATE_LR,
     B1_OUTPUT_LR,
     audit_b1_trainable_parameters,
     configure_b1_trainable_parameters,
