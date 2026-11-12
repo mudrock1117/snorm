@@ -120,3 +120,11 @@
 - 已改为捕获真实 mode-13 的 base/restored/selected/clean-reference/gate，逐 Gate 参数报告 autograd 与梯度数值，并统一汇总所有审计条件。
 - 增加仅用于 audit、执行后完整恢复 predictor bias 的 off-optimum 检查；正式 Gate init=0.5、alpha_max=1.2、loss 和训练路径均未修改。
 - 待服务器 GPU1 复核后，才能确定本次真实样本属于断图、数学最优点零梯度或其他数值零梯度。
+
+
+### B1 第三次 GPU audit：payload 返回修复（2026-11-12）
+
+- 第三次服务器 audit 已运行到 protected optimizer step；失败原因是 mode_training=13 将诊断写入局部 outputs，但训练 forward 仍返回形参 outputs_teacher（默认 None）。
+- 已将 mode 13 的 outputs 显式路由到返回元数据；loss、forward 数值、优化器及参数保护均未改变。
+- audit 新增显式阶段契约和 model/teacher/selective/SNORM_EXPERIMENT/payload 状态日志；缺失 payload 会记录 failure reason，并在末尾统一返回失败状态。
+- 待服务器 GPU1 再次执行完整 audit。
