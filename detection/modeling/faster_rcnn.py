@@ -230,6 +230,10 @@ class FasterRCNN(nn.Module):
                         "selective_legacy"
                     ].detach(),
                 }
+                # The legacy function returns outputs_teacher for all training
+                # modes. B1 builds diagnostics in outputs, so explicitly route
+                # that metadata without changing losses or model computation.
+                outputs_teacher = outputs
 
             ########detection + e-net########
             elif mode_training == 1:
