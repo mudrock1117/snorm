@@ -27,6 +27,7 @@ from detection.modeling.discriminator.InDiscriminator import InstanceDiscriminat
 #from detection.modeling.norm.R202503X.SNorm_0322_valid import SNorm
 #from detection.modeling.norm.R202503X.SNorm_0322_valid_refine import SNorm
 from detection.modeling.norm.R202509x.SNorm_0322_valid_refine import SNorm
+from detection.modeling.norm.selective_ahdr import SelectiveAHDRGate
 #from detection.modeling.norm.R202509x.SNorm_0322_valid_refine_expmamba import SNorm
 
 #
@@ -104,6 +105,20 @@ class ModuleSet(nn.Module):
             #    #nn.ReLU()
             #)
             self.proj_norm = SNorm()
+            self.selective_ahdr_enabled = bool(cfg.SELECTIVE_AHDR.ENABLED)
+            if self.selective_ahdr_enabled:
+                self.selective_ahdr_gate = SelectiveAHDRGate(
+                    channels=3,
+                    hidden_channels=cfg.SELECTIVE_AHDR.HIDDEN_CHANNELS,
+                    alpha_max=cfg.SELECTIVE_AHDR.ALPHA_MAX,
+                    gate_init=cfg.SELECTIVE_AHDR.GATE_INIT,
+                )
+                print(
+                    "[B1 SELECTIVE-AHDR] gate parameters =",
+                    self.selective_ahdr_gate.parameter_count(),
+                )
+            else:
+                self.selective_ahdr_gate = None
 
             #self.proj_dbias = I2ITienhance(cfg)
         
@@ -532,7 +547,32 @@ class ModuleSet(nn.Module):
             }
             return x, _empty
         elif self.cfg.MODEL.MODE.PJOTYPE == 'NBIAS':
-            nx, feat_dict = self.proj_norm(x, use_moe=use_moe, use_moe_fusion=use_moe_fusion, moe_mode=moe_mode, moe_mark=moe_mark)
+            nx, feat_dict = self.proj_norm(
+                x,
+                use_moe=use_moe,
+                use_moe_fusion=use_moe_fusion,
+                moe_mode=moe_mode,
+                moe_mark=moe_mark,
+                targets=targets,
+                force_eval_render=(
+                    self.selective_ahdr_enabled and self.training
+                ),
+            )
+            if self.selective_ahdr_enabled:
+                required = ("selective_base", "selective_restored", "selective_legacy")
+                missing = [key for key in required if key not in feat_dict]
+                if missing:
+                    raise RuntimeError(
+                        "B1 Selective-AHDR endpoints missing: %s" % missing
+                    )
+                nx, selective = self.selective_ahdr_gate(
+                    feat_dict["selective_base"],
+                    feat_dict["selective_restored"],
+                )
+                feat_dict["selective"] = selective
+                feat_dict["initialization_diff"] = (
+                    nx - feat_dict["selective_legacy"]
+                )
             if  use_dbiase:
                 domain_num = 0 if domain == 'source' else 1
                 nx = self.proj_dbias.read_memory(nx, targets, stride=stride, domain=1)
