@@ -4,6 +4,7 @@ import copy
 import random
 import torch.nn as nn
 import torch.nn.functional as F
+from detection.modeling.norm.selective_ahdr import extract_ahdr_render_tensor
 from torchvision import ops
 
 import numpy as np
@@ -786,18 +787,7 @@ class SNorm(nn.Module):
         explicitly without changing render_net mode or return values.
         """
         result = self.render_net(x0, x1, x2)
-        if torch.is_tensor(result):
-            return result
-        if (
-                isinstance(result, (tuple, list))
-                and len(result) == 2
-                and torch.is_tensor(result[0])
-                and isinstance(result[1], dict)):
-            return result[0]
-        raise TypeError(
-            "unexpected AHDR return contract: %s"
-            % type(result).__name__
-        )
+        return extract_ahdr_render_tensor(result)
 
     def norm_back(self, feats):
         feats = feats * 0.5 + 0.5
