@@ -206,6 +206,46 @@ def perturbation_consistency_gradient(model, captured, consistency_weight,
             bias.copy_(old_bias)
 
 
+def perturbation_object_consistency_gradient(
+        model, captured, object_mask, object_weight,
+        named_gate_parameters):
+    """Audit-only masked off-optimum check with exact bias restoration."""
+    gate_module = model.teacher.selective_ahdr_gate
+    bias = gate_module.predictor.bias
+    old_bias = bias.detach().clone()
+    try:
+        with torch.no_grad():
+            bias.add_(0.2)
+        selected, info = gate_module(
+            captured["gate_base"].detach(),
+            captured["gate_restored"].detach(),
+        )
+        distance = F.smooth_l1_loss(
+            selected,
+            captured["clean_reference"].detach(),
+            reduction="none",
+        )
+        expanded_mask = object_mask.detach().expand_as(distance)
+        raw_loss = (
+            distance * expanded_mask
+        ).sum() / (expanded_mask.sum() + 1e-6)
+        loss = float(object_weight) * raw_loss
+        total, details = gradient_diagnostics(loss, named_gate_parameters)
+        return {
+            "loss": float(loss.detach().item()),
+            "raw_loss": float(raw_loss.detach().item()),
+            "gradient_norm": total,
+            "gradient_details": details,
+            "gate_mean": float(info["gate"].detach().mean().item()),
+            "coefficient_mean": float(
+                info["coefficient"].detach().mean().item()
+            ),
+        }
+    finally:
+        with torch.no_grad():
+            bias.copy_(old_bias)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config-file", required=True)
@@ -339,16 +379,16 @@ def main():
         gradient_diagnostics(consistency_only, gate_named)
     )
     optimizer.zero_grad()
-    object_losses, _, object_payload, _ = run_b1_diagnostic_forward(
-        "object_consistency_only", model, images, img_metas, targets,
-        degraded, failures
+    object_losses, _, object_payload, object_capture = (
+        run_b1_diagnostic_forward(
+            "object_consistency_only", model, images, img_metas, targets,
+            degraded, failures, capture=True
+        )
     )
     object_consistency_only = object_losses["b1_object_consistency"]
     object_consistency_gate_gradient, object_gradient_details = (
         gradient_diagnostics(object_consistency_only, gate_named)
     )
-    if object_consistency_gate_gradient <= 0:
-        failures.append("object consistency loss alone has no gate gradient")
 
     base = consistency_capture["gate_base"]
     restored = consistency_capture["gate_restored"]
@@ -384,6 +424,77 @@ def main():
                 "consistency gradient is zero without exact optimum proof "
                 "and a successful audit-only perturbation"
             )
+
+    object_has_none = any(
+        item["is_none"] for item in object_gradient_details.values()
+    )
+    object_mask = (
+        object_payload["object_mask"].detach()
+        if object_payload is not None else None
+    )
+    object_mask_coverage = (
+        float(object_mask.sum().item())
+        if object_mask is not None else 0.0
+    )
+    object_region_max_diff = None
+    object_exact_optimum = False
+    object_perturbation = None
+    object_loss_tolerance = 1e-12
+    if object_mask is not None:
+        object_difference = (
+            object_capture["selected"]
+            - object_capture["clean_reference"]
+        ).detach().abs()
+        expanded_object_mask = object_mask.expand_as(object_difference)
+        if object_mask_coverage > 0:
+            object_region_max_diff = float(
+                (object_difference * expanded_object_mask).max().item()
+            )
+        else:
+            object_region_max_diff = 0.0
+        object_exact_optimum = (
+            abs(float(object_consistency_only.detach().item()))
+            <= object_loss_tolerance
+            and not object_has_none
+            and object_mask_coverage > 0
+            and object_region_max_diff <= object_loss_tolerance
+        )
+        object_perturbation = perturbation_object_consistency_gradient(
+            model,
+            object_capture,
+            object_mask,
+            float(cfg.SELECTIVE_AHDR.OBJ_CONS_WEIGHT),
+            gate_named,
+        )
+
+    if object_has_none:
+        object_gradient_classification = "disconnected"
+        failures.append(
+            "object consistency autograd path is disconnected "
+            "from gate parameters"
+        )
+    elif object_consistency_gate_gradient > 0:
+        object_gradient_classification = "nonzero"
+    elif object_exact_optimum:
+        object_gradient_classification = (
+            "numerical_zero_at_exact_optimum"
+        )
+        if not (
+                object_perturbation is not None
+                and object_perturbation["loss"] > object_loss_tolerance
+                and object_perturbation["gradient_norm"] > 0):
+            failures.append(
+                "object exact optimum lacks a successful "
+                "audit-only perturbation"
+            )
+    else:
+        object_gradient_classification = (
+            "numerical_zero_without_exact_optimum"
+        )
+        failures.append(
+            "object consistency gradient is zero without "
+            "exact optimum proof"
+        )
 
     frozen_modules = {
         "backbone_0": model.teacher.backbone_0,
@@ -581,7 +692,17 @@ def main():
     print("consistency-only gate gradients =", consistency_gradient_details)
     print("object-consistency-only gate gradients =",
           object_gradient_details)
+    print("object consistency loss value =",
+          float(object_consistency_only.detach().item()))
+    print("object mask coverage =", object_mask_coverage)
+    print("object-region selected/reference max absolute difference =",
+          object_region_max_diff)
+    print("object exact optimum =", object_exact_optimum)
+    print("object consistency gradient classification =",
+          object_gradient_classification)
     print("audit-only perturbed consistency =", perturbation)
+    print("audit-only perturbed object consistency =",
+          object_perturbation)
     print("detection-only gate gradient norm =", detection_gate_gradient)
     print("consistency-only gate gradient norm =", consistency_gate_gradient)
     print("object-consistency-only gate gradient norm =",
