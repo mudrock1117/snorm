@@ -331,6 +331,7 @@ def main():
     }
     gathered = all_rank_results(local_result)
 
+    aggregate_failed = bool(local_failures)
     if rank == 0:
         failure_reasons = []
         for result in gathered:
@@ -395,6 +396,7 @@ def main():
             item["frozen_module_delta"] for item in gathered
         ])
         print("all ranks completed =", len(gathered) == world_size)
+        aggregate_failed = bool(failure_reasons)
         if failure_reasons:
             print("[B1 DDP AUDIT FAIL]")
             print("failure_reasons =", failure_reasons)
@@ -404,7 +406,7 @@ def main():
 
     dist.barrier()
     has_failure = torch.tensor(
-        [1 if local_failures else 0], device=device, dtype=torch.int32
+        [1 if aggregate_failed else 0], device=device, dtype=torch.int32
     )
     dist.all_reduce(has_failure, op=dist.ReduceOp.MAX)
     return int(has_failure.item())
