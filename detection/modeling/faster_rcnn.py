@@ -226,6 +226,9 @@ class FasterRCNN(nn.Module):
                     "initialization_diff": degraded_output["feat_dict"][
                         "initialization_diff"
                     ],
+                    "legacy_feature": degraded_output["feat_dict"][
+                        "selective_legacy"
+                    ].detach(),
                 }
 
             ########detection + e-net########
