@@ -481,6 +481,31 @@ def main(det_cfg, args):
                                       batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=det_cfg.DATALOADER.NUM_WORKERS, shuffle=False)
         target_loader = build_data_loaders(det_cfg.DATASETS.TARGETS, transforms=det_cfg.INPUT.TRANSFORMS_TRAIN, is_train=True, distributed=args.distributed,
                                        batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=0, shuffle=True)
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1':
+            _configured_batch = int(det_cfg.SOLVER.BATCH_SIZE)
+            _loader_batch = int(train_loader.batch_sampler.batch_size)
+            if _loader_batch != _configured_batch:
+                raise RuntimeError(
+                    'B1 DataLoader batch mismatch: cfg=%s loader=%s'
+                    % (_configured_batch, _loader_batch)
+                )
+            if args.distributed and _configured_batch != 4:
+                raise RuntimeError(
+                    'B1 DDP requires per-rank SOLVER.BATCH_SIZE=4; got %s'
+                    % _configured_batch
+                )
+            if dist_utils.is_main_process():
+                _world_size = dist_utils.get_world_size()
+                print('[B1 DDP BATCH] cfg per-rank =', _configured_batch)
+                print('[B1 DDP BATCH] loader per-rank =', _loader_batch)
+                print('[B1 DDP BATCH] global =',
+                      _loader_batch * _world_size)
+                print('[B1 DDP BATCH] dataset =',
+                      len(train_loader.dataset))
+                print('[B1 DDP BATCH] sampler samples/rank =',
+                      len(train_loader.batch_sampler.sampler))
+                print('[B1 DDP BATCH] optimizer steps/epoch =',
+                      len(train_loader))
     
     # 加载测试数据
     test_loaders = build_data_loaders(det_cfg.DATASETS.TESTS, transforms=det_cfg.INPUT.TRANSFORMS_TEST, is_train=False,
