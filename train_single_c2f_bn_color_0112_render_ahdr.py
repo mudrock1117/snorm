@@ -15,8 +15,11 @@ if not os.environ.get('CUDA_VISIBLE_DEVICES'):
 # 降低显存碎片化风险：限制单次分配上限，避免大块分裂
 os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'max_split_size_mb:128')
 import torch
-torch.cuda.init()  # 显式初始化CUDA上下文
-torch.cuda.synchronize()  # 确保CUDA就绪
+# Under launch, init_distributed_mode() must select LOCAL_RANK before any CUDA
+# context is created. Otherwise every process first allocates on logical GPU 0.
+if int(os.environ.get('WORLD_SIZE', '1')) == 1:
+    torch.cuda.init()
+    torch.cuda.synchronize()
 import torchvision
 from torch import nn
 from torch.nn.parallel import DistributedDataParallel
