@@ -270,23 +270,10 @@ def main():
         raise RuntimeError("B1 gate is outside [0,1]")
     mean_abs_diff = float(initialization_diff.abs().mean().item())
     max_abs_diff = float(initialization_diff.abs().max().item())
-    legacy = (
-        forward_outputs["b1"]["initialization_diff"]
-        + forward_outputs["b1"]["initialization_diff"].new_zeros(
-            forward_outputs["b1"]["initialization_diff"].shape
-        )
-    )
-    selected_norm = float(
-        forward_outputs["b1"]["initialization_diff"].new_tensor(
-            1e-12
-        ).item()
-    )
+    legacy = forward_outputs["b1"]["legacy_feature"].detach()
     relative_l2 = float(
         initialization_diff.pow(2).sum().sqrt().item()
-        / (
-            forward_outputs["b1"]["coefficient"].detach().pow(2).sum().sqrt().item()
-            + selected_norm
-        )
+        / (legacy.pow(2).sum().sqrt().item() + 1e-12)
     )
     if max_abs_diff > 1e-5:
         raise RuntimeError(
