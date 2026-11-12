@@ -30,7 +30,6 @@ from detection.modeling.build import build_detectors
 from detection.utils import dist_utils
 from diagnostics.small_anchor import load_small_anchor_checkpoint
 from diagnostics.b1_protected import (
-    B1_GATE_LR,
     B1_OUTPUT_LR,
     audit_b1_trainable_parameters,
     configure_b1_trainable_parameters,
