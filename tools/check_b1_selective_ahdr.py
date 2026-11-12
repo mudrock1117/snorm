@@ -310,8 +310,11 @@ def main():
     failures = []
 
     optimizer.zero_grad()
-    detection_losses, _ = b1_forward(
-        model, images, img_metas, targets, degraded
+    detection_losses, _, detection_payload, _ = (
+        run_b1_diagnostic_forward(
+            "detection_only", model, images, img_metas, targets,
+            degraded, failures
+        )
     )
     detection_only = sum(
         value for key, value in detection_losses.items()
@@ -324,16 +327,20 @@ def main():
         failures.append("detection loss alone has no gate gradient")
 
     optimizer.zero_grad()
-    consistency_losses, _, consistency_capture = b1_forward_with_capture(
-        model, images, img_metas, targets, degraded
+    consistency_losses, _, consistency_payload, consistency_capture = (
+        run_b1_diagnostic_forward(
+            "consistency_only", model, images, img_metas, targets,
+            degraded, failures, capture=True
+        )
     )
     consistency_only = consistency_losses["b1_consistency"]
     consistency_gate_gradient, consistency_gradient_details = (
         gradient_diagnostics(consistency_only, gate_named)
     )
     optimizer.zero_grad()
-    object_losses, _ = b1_forward(
-        model, images, img_metas, targets, degraded
+    object_losses, _, object_payload, _ = run_b1_diagnostic_forward(
+        "object_consistency_only", model, images, img_metas, targets,
+        degraded, failures
     )
     object_consistency_only = object_losses["b1_object_consistency"]
     object_consistency_gate_gradient, object_gradient_details = (
@@ -394,8 +401,11 @@ def main():
     gate_before = snapshot_module(model.teacher.selective_ahdr_gate)
 
     optimizer.zero_grad()
-    losses, forward_outputs = b1_forward(
-        model, images, img_metas, targets, degraded
+    losses, forward_outputs, step_payload, step_capture = (
+        run_b1_diagnostic_forward(
+            "protected_optimizer_step", model, images, img_metas,
+            targets, degraded, failures, capture=True
+        )
     )
     detection_raw = sum(
         value for key, value in losses.items()
