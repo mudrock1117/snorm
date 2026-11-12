@@ -328,3 +328,44 @@ def test_b1_protects_old_outputs_updates_gate_and_freezes_shared_conv():
         )
     )
     assert all(value == 0 for value in old_delta.values())
+
+
+def test_ahdr_training_tuple_extracts_verified_render_tensor():
+    from detection.modeling.norm.selective_ahdr import (
+        extract_ahdr_render_tensor,
+    )
+
+    rendered = torch.randn(1, 3, 5, 7)
+    auxiliary = {
+        "attn": [torch.zeros(1)],
+        "residual": torch.zeros_like(rendered),
+        "fused_feats": [],
+    }
+    assert extract_ahdr_render_tensor(rendered) is rendered
+    assert extract_ahdr_render_tensor((rendered, auxiliary)) is rendered
+    with pytest.raises(TypeError):
+        extract_ahdr_render_tensor((auxiliary, rendered))
+
+
+def test_source_object_mask_non_square_width_height_projection_and_clipping():
+    from detection.modeling.norm.selective_ahdr import (
+        project_source_boxes_to_mask,
+    )
+
+    targets = [
+        {"boxes": torch.tensor([[50.0, 20.0, 70.0, 40.0]])},
+        {"boxes": torch.tensor([[-10.0, -5.0, 220.0, 120.0]])},
+        {"boxes": torch.tensor([[199.0, 99.0, 199.2, 99.2]])},
+    ]
+    masks = project_source_boxes_to_mask(
+        targets,
+        feature_size=(10, 20),
+        image_sizes=[(200, 100), (200, 100), (200, 100)],
+    )
+
+    expected = torch.zeros(10, 20)
+    expected[2:4, 5:7] = 1
+    assert torch.equal(masks[0, 0], expected)
+    assert masks[1, 0].sum().item() == 10 * 20
+    assert masks[2, 0].sum().item() == 1
+    assert masks[2, 0, 9, 19].item() == 1
