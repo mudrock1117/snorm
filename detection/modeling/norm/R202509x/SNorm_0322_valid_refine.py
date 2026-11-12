@@ -632,7 +632,9 @@ class SNorm(nn.Module):
             elif _ablation == 'no_ahdr':
                 output = save_im0
             elif _ablation == 'single_ahdr':
-                output = self.render_net(feats_mem[0], save_im0, feats_mem[1])
+                output = self._legacy_render_tensor(
+                    feats_mem[0], save_im0, feats_mem[1]
+                )
                 output = output * _res_w + save_im0 * (1 - _res_w)
             else:
                 _debug_save = os.environ.get('SNORM_DEBUG_SAVE', '0') == '1'
@@ -652,7 +654,7 @@ class SNorm(nn.Module):
                         )
 
                 _previous = save_im0 if _diag is not None else None
-                _raw_render = self.render_net(feats_mem[0], save_im0, feats_mem[1])
+                _raw_render = self._legacy_render_tensor(feats_mem[0], save_im0, feats_mem[1])
                 output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                 if _diag is not None:
                     _diag.record_ahdr_step(
@@ -664,7 +666,7 @@ class SNorm(nn.Module):
 
                 if _steps >= 2:
                     _previous = output if _diag is not None else None
-                    _raw_render = self.render_net(feats_mem[1], output, feats_mem[3])
+                    _raw_render = self._legacy_render_tensor(feats_mem[1], output, feats_mem[3])
                     output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                     if _diag is not None:
                         _diag.record_ahdr_step(
@@ -676,7 +678,7 @@ class SNorm(nn.Module):
 
                 if _steps >= 3:
                     _previous = output if _diag is not None else None
-                    _raw_render = self.render_net(feats_mem[2], output, feats_mem[3])
+                    _raw_render = self._legacy_render_tensor(feats_mem[2], output, feats_mem[3])
                     output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                     if _diag is not None:
                         _diag.record_ahdr_step(
@@ -688,7 +690,7 @@ class SNorm(nn.Module):
 
                 if _steps >= 4:
                     _previous = output if _diag is not None else None
-                    _raw_render = self.render_net(feats_mem[3], output, feats_mem[3])
+                    _raw_render = self._legacy_render_tensor(feats_mem[3], output, feats_mem[3])
                     output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                     if _diag is not None:
                         _diag.record_ahdr_step(
@@ -700,7 +702,7 @@ class SNorm(nn.Module):
 
                 if _steps >= 5:
                     _previous = output if _diag is not None else None
-                    _raw_render = self.render_net(feats_mem[4], output, feats_mem[3])
+                    _raw_render = self._legacy_render_tensor(feats_mem[4], output, feats_mem[3])
                     output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                     if _diag is not None:
                         _diag.record_ahdr_step(
@@ -717,7 +719,7 @@ class SNorm(nn.Module):
                     if _do_debug:
                         _all_refs[6] = _s6_ref.clone()
                     _previous = output if _diag is not None else None
-                    _raw_render = self.render_net(_s6_ref, output, feats_mem[3])
+                    _raw_render = self._legacy_render_tensor(_s6_ref, output, feats_mem[3])
                     output = _raw_render * _res_w + save_im0 * (1 - _res_w)
                     if _diag is not None:
                         _diag.record_ahdr_step(
@@ -775,6 +777,28 @@ class SNorm(nn.Module):
     ############################
     # 下面是各种归一化 / 变换算子
     ############################
+    def _legacy_render_tensor(self, x0, x1, x2):
+        """Return the Tensor that legacy AHDR blends with save_im0.
+
+        OHDR returns Tensor in eval mode and (Tensor, auxiliary_dict) in
+        training mode. B1 intentionally reuses the legacy render algorithm
+        while the model remains in training mode, so the contract is parsed
+        explicitly without changing render_net mode or return values.
+        """
+        result = self.render_net(x0, x1, x2)
+        if torch.is_tensor(result):
+            return result
+        if (
+                isinstance(result, (tuple, list))
+                and len(result) == 2
+                and torch.is_tensor(result[0])
+                and isinstance(result[1], dict)):
+            return result[0]
+        raise TypeError(
+            "unexpected AHDR return contract: %s"
+            % type(result).__name__
+        )
+
     def norm_back(self, feats):
         feats = feats * 0.5 + 0.5
         return feats
