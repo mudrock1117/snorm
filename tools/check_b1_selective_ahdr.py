@@ -582,27 +582,32 @@ def main():
     print("new-anchor parameter delta =", new_delta)
     print("gate parameter delta =", gate_delta)
     print("frozen module delta =", frozen_delta)
-    object_mask = forward_outputs["b1"]["object_mask"].detach()
     gt_example = (
         targets[0]["boxes"][0].detach().cpu().tolist()
         if len(targets) and targets[0]["boxes"].numel() else None
     )
     print("source img_shape =", [meta["img_shape"] for meta in img_metas])
-    print("selected feature shape =", list(
-        forward_outputs["b1"]["legacy_feature"].shape
-    ))
     print("source GT box example =", gt_example)
-    print("object mask shape =", list(object_mask.shape))
-    print("object mask coverage =", [
-        float(mask.sum().item()) for mask in object_mask
-    ])
-    print("gate min/max/mean/std =", (
-        float(gate.min().item()), float(gate.max().item()),
-        float(gate.mean().item()), float(gate.std().item()),
-    ))
-    print("effective coefficient mean/std =", (
-        float(coefficient.mean().item()), float(coefficient.std().item()),
-    ))
+    if step_payload is not None:
+        object_mask = step_payload["object_mask"].detach()
+        print("selected feature shape =", list(
+            step_payload["legacy_feature"].shape
+        ))
+        print("object mask shape =", list(object_mask.shape))
+        print("object mask coverage =", [
+            float(mask.sum().item()) for mask in object_mask
+        ])
+        print("gate min/max/mean/std =", (
+            float(gate.min().item()), float(gate.max().item()),
+            float(gate.mean().item()), float(gate.std().item()),
+        ))
+        print("effective coefficient mean/std =", (
+            float(coefficient.mean().item()), float(coefficient.std().item()),
+        ))
+    else:
+        print("selected feature shape = unavailable")
+        print("object mask shape = unavailable")
+        print("object mask coverage = unavailable")
     print("initialization mean_abs_diff =", mean_abs_diff)
     print("initialization max_abs_diff =", max_abs_diff)
     print("initialization relative_L2_diff =", relative_l2)
@@ -612,7 +617,8 @@ def main():
         print("[B1 AUDIT FAIL]")
         for failure in failures:
             print("FAIL:", failure)
-        raise RuntimeError("B1 audit failed: %s" % "; ".join(failures))
+        print("failure_reasons =", failures)
+        return 1
     print("[B1 AUDIT PASS]")
     print("PASS")
 
