@@ -171,6 +171,20 @@ _C.MODEL.MODE.USE_MOE_FUSION_TEST = False
 
 
 # ---------------------------------------------------------------------------- #
+# Optional Selective-AHDR experiment (disabled for every legacy config)
+# ---------------------------------------------------------------------------- #
+_C.SELECTIVE_AHDR = CN()
+_C.SELECTIVE_AHDR.ENABLED = False
+_C.SELECTIVE_AHDR.ALPHA_MAX = 1.2
+_C.SELECTIVE_AHDR.GATE_INIT = 0.5
+_C.SELECTIVE_AHDR.HIDDEN_CHANNELS = 8
+_C.SELECTIVE_AHDR.GATE_LR = 1e-5
+_C.SELECTIVE_AHDR.CONS_WEIGHT = 0.01
+_C.SELECTIVE_AHDR.OBJ_CONS_WEIGHT = 0.01
+_C.SELECTIVE_AHDR.GATE_REG_WEIGHT = 0.001
+_C.SELECTIVE_AHDR.LOG_INTERVAL = 50
+
+# ---------------------------------------------------------------------------- #
 # Solver options
 # ---------------------------------------------------------------------------- #
 _C.SOLVER = CN()
