@@ -201,16 +201,26 @@ def _accumulate_predictions_from_multiple_gpus(predictions_per_gpu):
 def evaluation(model, data_loaders, device, types=('coco',), output_dir='./evaluations/', iteration=None, viz=False):
     if not isinstance(data_loaders, (list, tuple)):
         data_loaders = (data_loaders,)
-    for root, dirs, files in os.walk(output_dir):
-        for d in dirs:
-            if d == 'error_analysis':
-                import shutil
-                shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+    if is_main_process():
+        for root, dirs, files in os.walk(output_dir):
+            for d in dirs:
+                if d == 'error_analysis':
+                    import shutil
+                    shutil.rmtree(
+                        os.path.join(root, d), ignore_errors=True
+                    )
+    if get_world_size() > 1:
+        dist.barrier()
     results = dict()
     for data_loader in data_loaders:
         dataset = data_loader.dataset
-        _output_dir = os.path.join(output_dir, 'evaluations', dataset.dataset_name)
-        os.makedirs(_output_dir, exist_ok=True)
+        _output_dir = os.path.join(
+            output_dir, 'evaluations', dataset.dataset_name
+        )
+        if is_main_process():
+            os.makedirs(_output_dir, exist_ok=True)
+        if get_world_size() > 1:
+            dist.barrier()
         result = do_evaluation(model, data_loader, device, types=types, output_dir=_output_dir, iteration=iteration, viz=viz)
         results[dataset.dataset_name] = result
     return results
