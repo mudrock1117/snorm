@@ -461,25 +461,31 @@ def main():
         if old_gradient[name] != 0:
             failures.append("B1 old-anchor gradient is nonzero: %s" % name)
 
-    gate = forward_outputs["b1"]["gate"].detach()
-    coefficient = forward_outputs["b1"]["coefficient"].detach()
-    initialization_diff = forward_outputs["b1"]["initialization_diff"].detach()
-    if not torch.isfinite(gate).all():
-        raise RuntimeError("B1 gate contains NaN/Inf")
-    if float(gate.min().item()) < 0 or float(gate.max().item()) > 1:
-        raise RuntimeError("B1 gate is outside [0,1]")
-    mean_abs_diff = float(initialization_diff.abs().mean().item())
-    max_abs_diff = float(initialization_diff.abs().max().item())
-    legacy = forward_outputs["b1"]["legacy_feature"].detach()
-    relative_l2 = float(
-        initialization_diff.pow(2).sum().sqrt().item()
-        / (legacy.pow(2).sum().sqrt().item() + 1e-12)
-    )
-    if max_abs_diff > 1e-5:
-        failures.append(
-            "B1 initialization does not preserve legacy output: max=%s"
-            % max_abs_diff
+    gate = None
+    coefficient = None
+    mean_abs_diff = None
+    max_abs_diff = None
+    relative_l2 = None
+    if step_payload is not None:
+        gate = step_payload["gate"].detach()
+        coefficient = step_payload["coefficient"].detach()
+        initialization_diff = step_payload["initialization_diff"].detach()
+        legacy = step_payload["legacy_feature"].detach()
+        if not torch.isfinite(gate).all():
+            failures.append("B1 gate contains NaN/Inf")
+        if float(gate.min().item()) < 0 or float(gate.max().item()) > 1:
+            failures.append("B1 gate is outside [0,1]")
+        mean_abs_diff = float(initialization_diff.abs().mean().item())
+        max_abs_diff = float(initialization_diff.abs().max().item())
+        relative_l2 = float(
+            initialization_diff.pow(2).sum().sqrt().item()
+            / (legacy.pow(2).sum().sqrt().item() + 1e-12)
         )
+        if max_abs_diff > 1e-5:
+            failures.append(
+                "B1 initialization does not preserve legacy output: max=%s"
+                % max_abs_diff
+            )
 
     optimizer.step()
     old_delta = controller.after_step(optimizer, protected)
