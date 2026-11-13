@@ -597,7 +597,7 @@ a3_controller=None):
         else:
             model_det.teacher.proj_norm.compute_norm_parameters(device=device)
     elif _a3_active:
-        print('[A3/A4/B1] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
+        print('[A3/A4/B1/B2] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
 
 def main(det_cfg, args):
     print('----num_workers:', det_cfg.DATALOADER.NUM_WORKERS)
@@ -613,25 +613,25 @@ def main(det_cfg, args):
             _loader_batch = int(train_loader.batch_sampler.batch_size)
             if _loader_batch != _configured_batch:
                 raise RuntimeError(
-                    'B1 DataLoader batch mismatch: cfg=%s loader=%s'
-                    % (_configured_batch, _loader_batch)
+                    '%s DataLoader batch mismatch: cfg=%s loader=%s'
+                    % (os.environ.get('SNORM_EXPERIMENT', 'E0'), _configured_batch, _loader_batch)
                 )
             if args.distributed and _configured_batch != 4:
                 raise RuntimeError(
-                    'B1 DDP requires per-rank SOLVER.BATCH_SIZE=4; got %s'
-                    % _configured_batch
+                    '%s DDP requires per-rank SOLVER.BATCH_SIZE=4; got %s'
+                    % (os.environ.get('SNORM_EXPERIMENT', 'E0'), _configured_batch)
                 )
             if dist_utils.is_main_process():
                 _world_size = dist_utils.get_world_size()
-                print('[B1 DDP BATCH] cfg per-rank =', _configured_batch)
-                print('[B1 DDP BATCH] loader per-rank =', _loader_batch)
-                print('[B1 DDP BATCH] global =',
+                print('[{} DDP BATCH] cfg per-rank ='.format(os.environ.get('SNORM_EXPERIMENT', 'E0')), _configured_batch)
+                print('[{} DDP BATCH] loader per-rank ='.format(os.environ.get('SNORM_EXPERIMENT', 'E0')), _loader_batch)
+                print('[{} DDP BATCH] global ='.format(os.environ.get('SNORM_EXPERIMENT', 'E0')),
                       _loader_batch * _world_size)
-                print('[B1 DDP BATCH] dataset =',
+                print('[{} DDP BATCH] dataset ='.format(os.environ.get('SNORM_EXPERIMENT', 'E0')),
                       len(train_loader.dataset))
-                print('[B1 DDP BATCH] sampler samples/rank =',
+                print('[{} DDP BATCH] sampler samples/rank ='.format(os.environ.get('SNORM_EXPERIMENT', 'E0')),
                       len(train_loader.batch_sampler.sampler))
-                print('[B1 DDP BATCH] optimizer steps/epoch =',
+                print('[{} DDP BATCH] optimizer steps/epoch ='.format(os.environ.get('SNORM_EXPERIMENT', 'E0')),
                       len(train_loader))
     
     # 加载测试数据
@@ -794,10 +794,10 @@ def main(det_cfg, args):
                       raise RuntimeError(
                           '%s requires SELECTIVE_AHDR.ENABLED' % _exp
                       )
-                  if float(_base_lr) != float(B1_OUTPUT_LR):
+                  if float(_base_lr) != float(B2_OUTPUT_LR if _exp == 'B2' else B1_OUTPUT_LR):
                       raise RuntimeError(
                           '%s requires SOLVER.LR=%s; got %s'
-                          % (_exp, B1_OUTPUT_LR, _base_lr)
+                          % (_exp, B2_OUTPUT_LR if _exp == 'B2' else B1_OUTPUT_LR, _base_lr)
                       )
                   _gate_lr = float(det_cfg.SELECTIVE_AHDR.GATE_LR)
                   if _exp == 'B2':
@@ -818,7 +818,7 @@ def main(det_cfg, args):
                       _gate_group = 'b1_selective_ahdr_gate'
                   model_paramters += [{
                       'params': _outputs,
-                      'lr': B1_OUTPUT_LR,
+                      'lr': B2_OUTPUT_LR if _exp == 'B2' else B1_OUTPUT_LR,
                       'name': _output_group,
                   }, {
                       'params': _gate,
