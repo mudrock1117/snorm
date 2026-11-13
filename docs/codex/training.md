@@ -68,3 +68,15 @@
 - 三卡正式配置为每 rank batch4、global batch12；Fog/Night 仅在既有 VOC evaluation 节点使用。
 
 验证状态：代码已静态审计并提供单卡/DDP audit；真实 checkpoint、数据、GPU audit、VOC evaluation 和正式训练均待服务器验证，未宣称性能提升。
+
+
+## C1 / Source-Adaptive Diversification（2026-11-13）
+
+- C1 采用 A3 protected 32-anchor 作为稳定基础，从固定 E2 checkpoint 初始化；不实例化或训练 B1/B2 Gate。
+- clear source tensor 从项目归一化空间 `[-1,1]` 还原到 `[0,1]` 后执行几何不变的 photometric、blur/noise/低对比、detail 与平滑 local-patch 扰动，再恢复原归一化。
+- source image 自身 mean/std/gradient energy 连续限制进一步变暗、降对比和削弱细节的强度；不读取 Fog/Night 统计。
+- source GT 生成 soft object/small masks，降低 object 区域的 blur/detail suppression/local degradation；GT boxes 不变，padding 区域保持原值。
+- optimizer 仍只有 A3 四个 RPN output Parameter，且仅新增 32-anchor 通道可更新；其余 detector、AHDR/SNorm、ROI 与 shared RPN conv 冻结。
+- Fog/Night 仅进入未修改的 VOC evaluation，节点为 500/1000/1500/1650/2000。
+
+验证状态：CPU 数学 smoke 通过；真实数据可视化、checkpoint forward、单卡/三卡 GPU audit 与正式训练未执行。
