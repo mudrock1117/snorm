@@ -37,6 +37,11 @@ from diagnostics.b1_protected import (
     audit_b1_trainable_parameters,
     configure_b1_trainable_parameters,
 )
+from diagnostics.b2_protected import (
+    B2_OUTPUT_LR,
+    audit_b2_trainable_parameters,
+    configure_b2_trainable_parameters,
+)
 from diagnostics.a3_protected import (
     ProtectedSmallAnchorStep,
     A4_OUTPUT_LR,
@@ -448,7 +453,7 @@ a3_controller=None):
     for name, m in model_inner.named_modules():
         if type(m).__name__ == 'SNorm':
             snorm_modules.append((name, m))
-    _a3_active = os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A3', 'A4', 'B1')
+    _a3_active = os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A3', 'A4', 'B1', 'B2')
     for name, m in snorm_modules:
         if _a3_active:
             continue
@@ -481,7 +486,7 @@ def main(det_cfg, args):
                                       batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=det_cfg.DATALOADER.NUM_WORKERS, shuffle=False)
         target_loader = build_data_loaders(det_cfg.DATASETS.TARGETS, transforms=det_cfg.INPUT.TRANSFORMS_TRAIN, is_train=True, distributed=args.distributed,
                                        batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=0, shuffle=True)
-        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1':
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2'):
             _configured_batch = int(det_cfg.SOLVER.BATCH_SIZE)
             _loader_batch = int(train_loader.batch_sampler.batch_size)
             if _loader_batch != _configured_batch:
@@ -520,8 +525,11 @@ def main(det_cfg, args):
     # are constructed. The later optimizer setup repeats this idempotently.
     if (
             args.distributed
-            and os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1'):
-        configure_b1_trainable_parameters(model_det)
+            and os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2')):
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B2':
+            configure_b2_trainable_parameters(model_det)
+        else:
+            configure_b1_trainable_parameters(model_det)
     
     model_without_ddp = model_det
     model_tran_without_ddp = None
@@ -615,7 +623,7 @@ def main(det_cfg, args):
     work_dir = det_cfg.WORK_DIR
     _exp_wd = os.environ.get('SNORM_EXPERIMENT', 'E0')
     if _exp_wd != 'E0':
-        _work_suffix = 'E2' if _exp_wd in ('A3', 'A4', 'B1') else _exp_wd
+        _work_suffix = 'E2' if _exp_wd in ('A3', 'A4', 'B1', 'B2') else _exp_wd
         work_dir = os.path.join(work_dir, _work_suffix)
         os.makedirs(work_dir, exist_ok=True)
         print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
@@ -776,7 +784,7 @@ def main(det_cfg, args):
                   audit_a3_trainable_parameters(model_without_ddp, optimizer_model)
           _total_epochs = det_cfg.SOLVER.EPOCHS
           _t_max = max(1, _total_epochs * len(train_loader))
-          if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A4', 'B1'):
+          if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A4', 'B1', 'B2'):
               _a4_min_factor = 1e-6 / A4_OUTPUT_LR
               def _a4_lr_factor(_step):
                   _progress = min(float(_step), float(_t_max)) / float(_t_max)
