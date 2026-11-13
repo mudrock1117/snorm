@@ -776,32 +776,49 @@ def main(det_cfg, args):
               _rn = _proj.render_net
               _sp = getattr(_proj, 'sigma_weight_pred', None)
               def _count(_params): return sum(p.numel() for p in _params)
-              if _exp == 'B1':
+              if _exp in ('B1', 'B2'):
                   if not _is_small_anchor_a:
-                      raise RuntimeError('B1 requires anchor sizes (32,64,128,256,512)')
+                      raise RuntimeError(
+                          '%s requires protected anchor sizes' % _exp
+                      )
                   if not bool(det_cfg.SELECTIVE_AHDR.ENABLED):
-                      raise RuntimeError('B1 requires SELECTIVE_AHDR.ENABLED=True')
+                      raise RuntimeError(
+                          '%s requires SELECTIVE_AHDR.ENABLED' % _exp
+                      )
                   if float(_base_lr) != float(B1_OUTPUT_LR):
                       raise RuntimeError(
-                          'B1 requires SOLVER.LR=%s; got %s'
-                          % (B1_OUTPUT_LR, _base_lr)
+                          '%s requires SOLVER.LR=%s; got %s'
+                          % (_exp, B1_OUTPUT_LR, _base_lr)
                       )
-                  _b1_gate_lr = float(det_cfg.SELECTIVE_AHDR.GATE_LR)
-                  _b1_outputs, _b1_gate, _b1_gate_names = (
-                      configure_b1_trainable_parameters(model_without_ddp)
-                  )
+                  _gate_lr = float(det_cfg.SELECTIVE_AHDR.GATE_LR)
+                  if _exp == 'B2':
+                      _outputs, _gate, _gate_names = (
+                          configure_b2_trainable_parameters(
+                              model_without_ddp
+                          )
+                      )
+                      _output_group = 'b2_new_32_anchor_output'
+                      _gate_group = 'b2_object_aware_gate'
+                  else:
+                      _outputs, _gate, _gate_names = (
+                          configure_b1_trainable_parameters(
+                              model_without_ddp
+                          )
+                      )
+                      _output_group = 'b1_new_32_anchor_output'
+                      _gate_group = 'b1_selective_ahdr_gate'
                   model_paramters += [{
-                      'params': _b1_outputs,
+                      'params': _outputs,
                       'lr': B1_OUTPUT_LR,
-                      'name': 'b1_new_32_anchor_output',
+                      'name': _output_group,
                   }, {
-                      'params': _b1_gate,
-                      'lr': _b1_gate_lr,
-                      'name': 'b1_selective_ahdr_gate',
+                      'params': _gate,
+                      'lr': _gate_lr,
+                      'name': _gate_group,
                   }]
                   a3_controller = ProtectedSmallAnchorStep(
                       model_without_ddp,
-                      extra_trainable_names=_b1_gate_names,
+                      extra_trainable_names=_gate_names,
                   )
               elif _exp == 'A4':
                   if not _is_small_anchor_a:
@@ -900,7 +917,13 @@ def main(det_cfg, args):
                   ))
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
           if a3_controller is not None:
-              if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1':
+              if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B2':
+                  audit_b2_trainable_parameters(
+                      model_without_ddp, optimizer_model,
+                      output_lr=B2_OUTPUT_LR,
+                      gate_lr=float(det_cfg.SELECTIVE_AHDR.GATE_LR),
+                  )
+              elif os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1':
                   audit_b1_trainable_parameters(
                       model_without_ddp, optimizer_model,
                       output_lr=B1_OUTPUT_LR,
