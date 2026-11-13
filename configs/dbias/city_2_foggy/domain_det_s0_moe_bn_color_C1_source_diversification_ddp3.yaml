@@ -1,0 +1,96 @@
+MODEL:
+  BACKBONE:
+    NAME: 'resnet101'
+  RPN:
+    ANCHOR_SIZES: (32, 64, 128, 256, 512)
+  ROI_BOX_HEAD:
+    NUM_CLASSES: 8
+    BOX_PREDICTOR: 'resnet101_predictor'
+    POOL_TYPE: 'align'
+  MODE:
+    USE_STUDENT: True
+    INSRANCE_ADV: True
+    UPDATE_TEACHER_ITERUM: 1
+    NET_MOMENTUM: 1.0
+    INIT_DIS_NET: 400
+    TRAIN_PROCESS: 'S0'
+    TEST_PROCESS: 'TC'
+    PJOTYPE: 'NBIAS'
+    UPDATE_STUDENT_MARK: True
+    UPDATE_TEACHER_MARK: True
+ADV:
+  LAYERS: [False, False, True]
+  DIS_MODEL:
+    - in_channels: 512
+      func_name: 'cross_entropy'
+      pool_type: 'avg'
+      loss_weight: 1.0
+      window_strides: [2, 2, 2, 2, 2, 2, 2]
+      window_sizes: [3, 9, 15, 21, 27, 33, 37]
+DATASETS:
+  TRAINS: ['bdd_daytime_clear_train']
+  TARGETS: ['bdd_daytime_clear_train']
+  TESTS: ['bdd_daytime_fog_test', 'bdd_night_sun_test']
+INPUT:
+  TRANSFORMS_TRAIN:
+    - name: 'random_flip'
+    - name: 'resize'
+      min_size: 640
+    - name: 'normalize'
+      mean: [0.5, 0.5, 0.5]
+      std: [0.5, 0.5, 0.5]
+      to_01: True
+    - name: 'collect'
+  TRANSFORMS_TEST:
+    - name: 'resize'
+      min_size: 640
+    - name: 'normalize'
+      mean: [0.5, 0.5, 0.5]
+      std: [0.5, 0.5, 0.5]
+      to_01: True
+    - name: 'collect'
+SOLVER:
+  EPOCHS: 120
+  STEPS: (16000, 32000, 42000)
+  LR: 5e-5
+  BATCH_SIZE: 4
+  GAMMA: 0.3
+TEST:
+  EVAL_TYPES: ['voc']
+C1_SOURCE_DIVERSIFICATION:
+  ENABLED: True
+  APPLY_PROB: 0.8
+  LOG_INTERVAL: 50
+  PHOTOMETRIC:
+    ENABLED: True
+    BRIGHTNESS: (0.72, 1.18)
+    CONTRAST: (0.72, 1.18)
+    GAMMA: (0.78, 1.28)
+    SATURATION: (0.75, 1.20)
+  DEGRADATION:
+    ENABLED: True
+    BLUR_SIGMA: (0.0, 1.4)
+    NOISE_STD: (0.0, 0.035)
+    ATTENUATION: (0.0, 0.22)
+  DETAIL:
+    ENABLED: True
+    K: (0.65, 1.25)
+    SIGMA: 1.0
+  LOCAL:
+    ENABLED: True
+    GRID_H: 3
+    GRID_W: 5
+    STRENGTH: (0.08, 0.22)
+    SMOOTH_SIGMA: 5.0
+  SOURCE_ADAPTIVE:
+    ENABLED: True
+    DARK_REFERENCE: 0.35
+    CONTRAST_REFERENCE: 0.18
+    GRADIENT_REFERENCE: 0.08
+  OBJECT_PROTECTION:
+    ENABLED: True
+    LAMBDA_OBJECT: 0.35
+    LAMBDA_SMALL: 0.25
+    BOX_EXPAND_RATIO: 1.10
+    SMALL_AREA_RATIO: 0.02
+WORK_DIR: './debug/city_2_foggy/s0_dbias_color_C1_source_diversification_ddp3'
