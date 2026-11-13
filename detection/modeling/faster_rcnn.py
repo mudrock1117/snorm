@@ -37,6 +37,10 @@ select_rect_weight_w_prob_1030, generate_moe_mask_v4, class_hl_loss, class_loss_
 
 from detection.modeling.norm.dice_loss import DiceLoss
 from detection.modeling.norm.selective_ahdr import selective_consistency_losses
+from detection.modeling.norm.object_aware_ahdr import (
+    build_object_aware_masks,
+    object_aware_gate_losses,
+)
 from detection.modeling.ModuleSet import ModuleSet
 #from detection.modeling.unet.lib_render import SSIMLoss
 from detection.modeling.unet.ssim import SSIM, mse_loss, edge_loss, tv_loss, patch_consistency_loss
@@ -233,6 +237,95 @@ class FasterRCNN(nn.Module):
                 # The legacy function returns outputs_teacher for all training
                 # modes. B1 builds diagnostics in outputs, so explicitly route
                 # that metadata without changing losses or model computation.
+                outputs_teacher = outputs
+
+            ########B2 protected detector + object-aware Gate########
+            elif mode_training == 14:
+                if not bool(self.cfg.SELECTIVE_AHDR.ENABLED):
+                    raise RuntimeError("mode_training=14 requires Selective-AHDR")
+                if not bool(self.cfg.B2_OBJECT_AWARE.ENABLED):
+                    raise RuntimeError("mode_training=14 requires B2_OBJECT_AWARE")
+                if stpd_images is None:
+                    raise RuntimeError(
+                        "B2 requires synthetic degraded source images"
+                    )
+                degraded_output = self.teacher(
+                    stpd_images, img_metas, targets_, mode=5,
+                    moe_mode=moe_mode, update_norm_p=False,
+                    is_update=False,
+                )
+                for key, value in degraded_output["rpn_losses_w"].items():
+                    loss_dict.update({key + "_w": value})
+                for key, value in degraded_output["box_losses_w"].items():
+                    loss_dict.update({key + "_w": value})
+
+                selective = degraded_output["feat_dict"]["selective"]
+                gate = selective["gate"]
+                valid_sizes = [meta["img_shape"] for meta in img_metas]
+                masks = build_object_aware_masks(
+                    targets_,
+                    valid_sizes,
+                    (stpd_images.size(-2), stpd_images.size(-1)),
+                    (gate.size(-2), gate.size(-1)),
+                    box_expand_ratio=float(
+                        self.cfg.B2_OBJECT_AWARE.BOX_EXPAND_RATIO
+                    ),
+                    small_area_ratio=float(
+                        self.cfg.B2_OBJECT_AWARE.SMALL_AREA_RATIO
+                    ),
+                    small_weight_beta=float(
+                        self.cfg.B2_OBJECT_AWARE.SMALL_WEIGHT_BETA
+                    ),
+                    device=gate.device,
+                    dtype=gate.dtype,
+                )
+                raw_losses = object_aware_gate_losses(
+                    gate,
+                    masks,
+                    object_floor=float(
+                        self.cfg.B2_OBJECT_AWARE.OBJECT_FLOOR
+                    ),
+                    small_object_floor=float(
+                        self.cfg.B2_OBJECT_AWARE.SMALL_OBJECT_FLOOR
+                    ),
+                )
+                weights = {
+                    "object_floor": float(
+                        self.cfg.B2_OBJECT_AWARE.OBJ_WEIGHT
+                    ),
+                    "small_floor": float(
+                        self.cfg.B2_OBJECT_AWARE.SMALL_WEIGHT
+                    ),
+                    "background": float(
+                        self.cfg.B2_OBJECT_AWARE.BG_WEIGHT
+                    ),
+                    "tv": float(self.cfg.B2_OBJECT_AWARE.TV_WEIGHT),
+                    "global_anchor": float(
+                        self.cfg.B2_OBJECT_AWARE.ANCHOR_WEIGHT
+                    ),
+                }
+                for name, value in raw_losses.items():
+                    loss_dict["b2_" + name] = weights[name] * value
+                outputs["b2"] = {
+                    "gate": gate,
+                    "coefficient": selective["coefficient"],
+                    "masks": masks,
+                    "raw_losses": {
+                        name: value.detach()
+                        for name, value in raw_losses.items()
+                    },
+                    "initialization_diff": degraded_output["feat_dict"][
+                        "initialization_diff"
+                    ],
+                    "legacy_feature": degraded_output["feat_dict"][
+                        "selective_legacy"
+                    ].detach(),
+                    "valid_image_sizes": valid_sizes,
+                    "padded_image_size": (
+                        int(stpd_images.size(-2)),
+                        int(stpd_images.size(-1)),
+                    ),
+                }
                 outputs_teacher = outputs
 
             ########detection + e-net########
