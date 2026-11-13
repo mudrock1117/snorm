@@ -394,3 +394,24 @@ python -m torch.distributed.launch --nproc_per_node=3 --master_port=29642 \
 
 所有 audit 均通过前不启动正式训练。B2 输出目录为
 `./debug/city_2_foggy/s0_dbias_color_B2_object_aware_ahdr_ddp3/E2`。
+
+
+## C1 Source-Adaptive Diversification
+
+可视化真实 clear-source 样本（不加载 Fog/Night）：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 SNORM_EXPERIMENT=C1 python tools/check_c1_augmentation.py \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color_C1_source_diversification_ddp3.yaml \
+  --output-dir diagnostic_runs/c1_source_diversification
+```
+
+单卡真实 protected-update audit：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 SNORM_EXPERIMENT=C1 python tools/check_c1_training.py \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color_C1_source_diversification_ddp3.yaml \
+  --checkpoint /home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/s0_dbias_color_E2_zdh/E2/best.pth
+```
+
+三卡先加 `--config-only` 检查 batch4/rank、global12、1610 steps，再去掉该参数执行轻量 protected-update audit。
