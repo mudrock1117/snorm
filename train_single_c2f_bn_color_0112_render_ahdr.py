@@ -28,6 +28,7 @@ from torch.utils.tensorboard import SummaryWriter
 from detection import utils
 from detection.config import cfg as det_cfg
 from detection.data.build import build_data_loaders
+from detection.data.source_diversification import SourceAdaptiveDiversification
 from detection.engine.eval import evaluation
 from detection.modeling.build import build_detectors
 from detection.utils import dist_utils
@@ -198,6 +199,12 @@ a3_controller=None):
         g_masks = g_masks.to(device)
         tr_images = tr_images.to(device)
         s_targets = [t.to(device) for t in targets]
+        _c1_stats = None
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C1':
+            _c1_augment = SourceAdaptiveDiversification(
+                det_cfg.C1_SOURCE_DIVERSIFICATION
+            )
+            images, _c1_stats = _c1_augment(images, img_metas, s_targets)
         
         try:
             t_images, t_img_metas, t_targets, t_sc_images, t_sc_trans, t_tr_images, t_tr_trans, t_g_masks = next(target_loader_iter)
@@ -409,12 +416,23 @@ a3_controller=None):
                         ])
                     del total_loss, det_only, loss_dict_det, outputs_det
                     torch.cuda.empty_cache()
-                elif _exp_loop in ('E1', 'E2', 'A3', 'A4'):
-                    loss_dict_det, _ = model_det(tr_images, img_metas, s_targets, mode_training=0, step_iter=global_step, \
+                elif _exp_loop in ('E1', 'E2', 'A3', 'A4', 'C1'):
+                    _detector_images = images if _exp_loop == 'C1' else tr_images
+                    loss_dict_det, _ = model_det(_detector_images, img_metas, s_targets, mode_training=0, step_iter=global_step, \
                                                 is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
                     det_loss_det = sum(list(loss_dict_det.values()))
                     det_loss_det.backward()
                     metric_logger.update(det_loss_s=det_loss_det)
+                    if (_exp_loop == 'C1' and dist_utils.is_main_process()
+                            and global_step % max(1, int(det_cfg.C1_SOURCE_DIVERSIFICATION.LOG_INTERVAL)) == 0):
+                        if _c1_stats.get('applied', False):
+                            _print_stats = dict(
+                                (key, value) for key, value in _c1_stats.items()
+                                if key not in ('object_mask', 'small_mask')
+                            )
+                            print('[C1 AUG] step={} {}'.format(global_step, _print_stats))
+                        else:
+                            print('[C1 AUG] step={} applied=False'.format(global_step))
                     del det_loss_det, loss_dict_det
                     torch.cuda.empty_cache()
                 else:
@@ -575,7 +593,7 @@ a3_controller=None):
     for name, m in model_inner.named_modules():
         if type(m).__name__ == 'SNorm':
             snorm_modules.append((name, m))
-    _a3_active = os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A3', 'A4', 'B1', 'B2')
+    _a3_active = os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A3', 'A4', 'B1', 'B2', 'C1')
     for name, m in snorm_modules:
         if _a3_active:
             continue
@@ -597,7 +615,7 @@ a3_controller=None):
         else:
             model_det.teacher.proj_norm.compute_norm_parameters(device=device)
     elif _a3_active:
-        print('[A3/A4/B1/B2] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
+        print('[A3/A4/B1/B2/C1] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
 
 def main(det_cfg, args):
     print('----num_workers:', det_cfg.DATALOADER.NUM_WORKERS)
@@ -647,9 +665,11 @@ def main(det_cfg, args):
     # are constructed. The later optimizer setup repeats this idempotently.
     if (
             args.distributed
-            and os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2')):
+            and os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1')):
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B2':
             configure_b2_trainable_parameters(model_det)
+        elif os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C1':
+            configure_a3_trainable_parameters(model_det)
         else:
             configure_b1_trainable_parameters(model_det)
     
@@ -685,7 +705,7 @@ def main(det_cfg, args):
         '/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/'
         's0_dbias_color_E2_zdh/E2/best.pth'
     )
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2'):
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1'):
         _protected_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
         if os.path.abspath(_load_path or '') != _b1_checkpoint:
             raise RuntimeError(
@@ -711,13 +731,18 @@ def main(det_cfg, args):
             raise RuntimeError(
                 '%s Fog/Night evaluation protocol changed' % _protected_exp
             )
+        if (_protected_exp == 'C1'
+                and not bool(det_cfg.C1_SOURCE_DIVERSIFICATION.ENABLED)):
+            raise RuntimeError('C1_SOURCE_DIVERSIFICATION.ENABLED must be True')
         if (
                 _protected_exp == 'B2'
                 and not bool(det_cfg.B2_OBJECT_AWARE.ENABLED)):
             raise RuntimeError('B2_OBJECT_AWARE.ENABLED must be True')
     print('[EXPERIMENT START]')
     print('experiment =', (
-        'B2_OBJECT_AWARE_SELECTIVE_AHDR'
+        'C1_SOURCE_ADAPTIVE_DIVERSIFICATION'
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C1'
+        else 'B2_OBJECT_AWARE_SELECTIVE_AHDR'
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B2'
         else 'B1_PROTECTED_SMALLANCHOR_SELECTIVE_AHDR'
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1'
@@ -760,7 +785,7 @@ def main(det_cfg, args):
     work_dir = det_cfg.WORK_DIR
     _exp_wd = os.environ.get('SNORM_EXPERIMENT', 'E0')
     if _exp_wd != 'E0':
-        _work_suffix = 'E2' if _exp_wd in ('A3', 'A4', 'B1', 'B2') else _exp_wd
+        _work_suffix = 'E2' if _exp_wd in ('A3', 'A4', 'B1', 'B2', 'C1') else _exp_wd
         work_dir = os.path.join(work_dir, _work_suffix)
         os.makedirs(work_dir, exist_ok=True)
         print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
@@ -829,6 +854,16 @@ def main(det_cfg, args):
                       model_without_ddp,
                       extra_trainable_names=_gate_names,
                   )
+              elif _exp == 'C1':
+                  if not _is_small_anchor_a:
+                      raise RuntimeError('C1 requires protected 32-anchor layout')
+                  _c1_parameters = configure_a3_trainable_parameters(model_without_ddp)
+                  model_paramters += [{
+                      'params': _c1_parameters,
+                      'lr': _base_lr,
+                      'name': 'c1_new_32_anchor_output_channels',
+                  }]
+                  a3_controller = ProtectedSmallAnchorStep(model_without_ddp)
               elif _exp == 'A4':
                   if not _is_small_anchor_a:
                       raise RuntimeError('A4 requires anchor sizes (32,64,128,256,512)')
@@ -944,7 +979,7 @@ def main(det_cfg, args):
                   audit_a3_trainable_parameters(model_without_ddp, optimizer_model)
           _total_epochs = det_cfg.SOLVER.EPOCHS
           _t_max = max(1, _total_epochs * len(train_loader))
-          if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A4', 'B1', 'B2'):
+          if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A4', 'B1', 'B2', 'C1'):
               _a4_min_factor = 1e-6 / A4_OUTPUT_LR
               def _a4_lr_factor(_step):
                   _progress = min(float(_step), float(_t_max)) / float(_t_max)
