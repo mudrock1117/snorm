@@ -7,6 +7,7 @@ import json
 import os
 import random
 
+import numpy as np
 import torch
 import torchvision
 
@@ -25,7 +26,10 @@ def main():
     cfg.merge_from_file(args.config_file)
     cfg.freeze()
     random.seed(args.seed)
+    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     os.makedirs(args.output_dir, exist_ok=True)
     loader = build_data_loaders(
         cfg.DATASETS.TRAINS, transforms=cfg.INPUT.TRANSFORMS_TRAIN,
