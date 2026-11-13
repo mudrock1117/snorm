@@ -185,6 +185,23 @@ _C.SELECTIVE_AHDR.GATE_REG_WEIGHT = 0.001
 _C.SELECTIVE_AHDR.LOG_INTERVAL = 50
 
 # ---------------------------------------------------------------------------- #
+# B2 source-only object-aware Gate supervision (disabled by default)
+# ---------------------------------------------------------------------------- #
+_C.B2_OBJECT_AWARE = CN()
+_C.B2_OBJECT_AWARE.ENABLED = False
+_C.B2_OBJECT_AWARE.OBJECT_FLOOR = 0.500
+_C.B2_OBJECT_AWARE.SMALL_OBJECT_FLOOR = 0.525
+_C.B2_OBJECT_AWARE.SMALL_AREA_RATIO = 0.020
+_C.B2_OBJECT_AWARE.SMALL_WEIGHT_BETA = 1.0
+_C.B2_OBJECT_AWARE.BOX_EXPAND_RATIO = 1.15
+_C.B2_OBJECT_AWARE.OBJ_WEIGHT = 0.05
+_C.B2_OBJECT_AWARE.SMALL_WEIGHT = 0.10
+_C.B2_OBJECT_AWARE.BG_WEIGHT = 0.02
+_C.B2_OBJECT_AWARE.TV_WEIGHT = 0.001
+_C.B2_OBJECT_AWARE.ANCHOR_WEIGHT = 0.01
+_C.B2_OBJECT_AWARE.LOG_INTERVAL = 50
+
+# ---------------------------------------------------------------------------- #
 # Solver options
 # ---------------------------------------------------------------------------- #
 _C.SOLVER = CN()
