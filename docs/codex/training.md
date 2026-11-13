@@ -56,3 +56,15 @@
 - 首版 ddp3 YAML 把换行误写为字面量 `\\n`，导致 `BATCH_SIZE: 4` 位于注释内并回退到默认值 1；真实首次 DDP audit 因此执行 batch1。
 - YAML 已修复为真实独立配置行。正式训练入口同时断言 cfg batch、BatchSampler batch 一致且 DDP per-rank batch 必须为4。
 - protected-update audit 默认显式使用轻量 execution batch1，并与 formal per-rank batch4 分开报告；`--config-only` 使用真实 batch4 DataLoader 验证 global12/1610 steps。
+
+
+## B2 / Object-Aware Selective-AHDR（2026-11-13）
+
+- B2 基于 B1 固定 E2 checkpoint、六步 AHDR、449 参数 Gate、`alpha_max=1.2` 和初始系数 0.6，不改变检测/AHDR forward 定义。
+- 独立 `mode_training=14` 保留 clear-source GT 的 RPN/RCNN cls/reg 四项检测损失；B1 consistency/object-consistency 不进入 B2 total loss。
+- source GT 按项目 `img_shape=(W,H)` 裁剪，并按 padded batch canvas `(H,W)` 投影到 Gate 网格；box 扩张 1.15，tiny box 至少覆盖一个 cell。
+- 新增 object floor、small-object floor、background、TV 和 global-anchor 五项 Gate loss，权重依次为 0.05/0.10/0.02/0.001/0.01。
+- optimizer 与 B1 完全相同：四个 RPN output Parameter（仅 32-anchor 通道可更新，LR 5e-5）和四个 Gate Parameter（LR 1e-5）；其余 detector、AHDR/SNorm、ROI、shared RPN conv 与 eval heads 冻结。
+- 三卡正式配置为每 rank batch4、global batch12；Fog/Night 仅在既有 VOC evaluation 节点使用。
+
+验证状态：代码已静态审计并提供单卡/DDP audit；真实 checkpoint、数据、GPU audit、VOC evaluation 和正式训练均待服务器验证，未宣称性能提升。
