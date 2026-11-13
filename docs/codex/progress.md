@@ -152,3 +152,11 @@
 - 保留 B1 Gate/anchor expansion/旧通道保护；未开放 shared RPN conv、backbone、proj_norm/render_net、ROI 或 eval heads。
 - 正式训练仍为 clear source-only；Fog/Night 仅用于 VOC evaluation。
 - 当前只完成代码级实现与静态审计；服务器 worktree、真实 GPU audit、正式训练和精度验证待用户执行。
+
+
+## 2026-11-13 C1 Source-Adaptive Diversification
+
+- 从 B2 commit `012eda8680820664028e7bdf919d7c880406a00e` 建立独立分支 `feature/c1_source_adaptive_diversification`。
+- 新增 source-only、geometry-preserving augmentation pool、source-content safety scaling、GT object/small protection、独立配置、可视化与单/三卡 protected audit。
+- 采用 A3 protected detector，不修改 B1/B2 Gate、AHDR/SNorm、检测 loss 或 VOC evaluator。
+- CPU smoke 验证 shape/range/finite、GT 不变、tiny mask 与 padding 保持；GPU audit 和正式实验待服务器执行。
