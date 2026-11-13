@@ -143,3 +143,12 @@
 - 三卡 protected-update audit 已真实 PASS，但暴露 ddp3 YAML 的字面量换行使 batch4 被注释、实际回退 batch1。
 - 已修复正式配置并新增 cfg/BatchSampler/input batch 三层报告与断言；正式目标恢复为 per-rank4、global12、6440 samples/rank、1610 steps/epoch。
 - 已通过 CPU sampler/config 逻辑检查；真实服务器 `--config-only` DataLoader audit 待执行。无需因该配置修复重复验证已通过的 batch1 protected-update 核心，除非需要额外验证 batch4 显存。
+
+
+## 2026-11-13 B2 Object-Aware Selective-AHDR
+
+- 从 B1 固定 commit `6bfeadaac081f41cebfa5e5ce58c2609f0972859` 创建独立远端分支 `feature/b2_object_aware_ahdr`。
+- 新增 source-GT object/small/background mask、五项 object-aware Gate loss、独立 mode14、配置、保护白名单、单卡 audit、三卡 DDP audit 与聚焦单元测试。
+- 保留 B1 Gate/anchor expansion/旧通道保护；未开放 shared RPN conv、backbone、proj_norm/render_net、ROI 或 eval heads。
+- 正式训练仍为 clear source-only；Fog/Night 仅用于 VOC evaluation。
+- 当前只完成代码级实现与静态审计；服务器 worktree、真实 GPU audit、正式训练和精度验证待用户执行。
