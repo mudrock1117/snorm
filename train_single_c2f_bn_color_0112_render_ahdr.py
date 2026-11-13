@@ -54,6 +54,7 @@ from diagnostics.a3_protected import (
 
 #from saver_domain import Saver
 import torch.nn.functional as F
+from detection.modeling.norm.object_aware_ahdr import masked_gate_statistics
 #from pro_utils import write_img, get_params
 #from functions import conduct_transformations
 
@@ -224,7 +225,119 @@ a3_controller=None):
                 torch.cuda.empty_cache()
             else:
                 _exp_loop = os.environ.get('SNORM_EXPERIMENT', 'E0')
-                if _exp_loop == 'B1':
+                if _exp_loop == 'B2':
+                    loss_dict_det, outputs_det = model_det(
+                        images, img_metas, s_targets,
+                        mode_training=14,
+                        step_iter=global_step,
+                        stpd_images=tr_images,
+                        is_update=False,
+                    )
+                    det_only = sum(
+                        value for key, value in loss_dict_det.items()
+                        if not key.startswith('b2_')
+                    )
+                    _required_detection_losses = {
+                        'rpn_cls_loss_w', 'rpn_reg_loss_w',
+                        'rcnn_cls_loss_w', 'rcnn_reg_loss_w',
+                    }
+                    _missing = sorted(
+                        _required_detection_losses - set(loss_dict_det.keys())
+                    )
+                    if _missing:
+                        raise RuntimeError(
+                            'B2 source detection losses missing: %s' % _missing
+                        )
+                    total_loss = sum(loss_dict_det.values())
+                    total_loss.backward()
+                    metric_logger.update(det_loss_s=total_loss)
+                    _log_interval = int(det_cfg.B2_OBJECT_AWARE.LOG_INTERVAL)
+                    if (
+                            dist_utils.is_main_process()
+                            and global_step % max(1, _log_interval) == 0):
+                        _b2 = outputs_det['b2']
+                        _gate = _b2['gate'].detach()
+                        _coef = _b2['coefficient'].detach()
+                        _masks = _b2['masks']
+                        _obj_mean, _obj_std, _obj_count = (
+                            masked_gate_statistics(
+                                _gate, _masks['object_mask']
+                            )
+                        )
+                        _small_mean, _small_std, _small_count = (
+                            masked_gate_statistics(
+                                _gate, _masks['small_support']
+                            )
+                        )
+                        _bg_mean, _bg_std, _bg_count = (
+                            masked_gate_statistics(
+                                _gate, _masks['background_mask']
+                            )
+                        )
+                        _inner = (
+                            model_det.module
+                            if hasattr(model_det, 'module') else model_det
+                        )
+                        _gate_grad_sq = 0.0
+                        for _parameter in (
+                                _inner.teacher.selective_ahdr_gate.parameters()):
+                            if _parameter.grad is not None:
+                                _gate_grad_sq += float(
+                                    _parameter.grad.detach().pow(2).sum().item()
+                                )
+                        print(
+                            '[B2 TRAIN] step={} total={:.6f} det={:.6f}'.format(
+                                global_step,
+                                float(total_loss.detach().item()),
+                                float(det_only.detach().item()),
+                            )
+                        )
+                        for _name in (
+                                'b2_object_floor', 'b2_small_floor',
+                                'b2_background', 'b2_tv',
+                                'b2_global_anchor'):
+                            print('[B2 TRAIN] {}={:.8f}'.format(
+                                _name,
+                                float(loss_dict_det[_name].detach().item()),
+                            ))
+                        print(
+                            '[B2 MASK] object_coverage={:.6f} '
+                            'small_coverage={:.6f} num_objects={} '
+                            'num_small_objects={}'.format(
+                                float(_masks['object_mask'].mean().item()),
+                                float(_masks['small_support'].mean().item()),
+                                sum(_masks['num_objects']),
+                                sum(_masks['num_small_objects']),
+                            )
+                        )
+                        print('[B2 GATE] global mean/std/min/max =', (
+                            float(_gate.mean().item()),
+                            float(_gate.std().item()),
+                            float(_gate.min().item()),
+                            float(_gate.max().item()),
+                        ))
+                        print('[B2 GATE] object mean/std =', (
+                            float(_obj_mean.item()), float(_obj_std.item())
+                        ))
+                        print('[B2 GATE] small mean/std =', (
+                            float(_small_mean.item()), float(_small_std.item())
+                        ))
+                        print('[B2 GATE] background mean/std =', (
+                            float(_bg_mean.item()), float(_bg_std.item())
+                        ))
+                        print('[B2 GATE] alpha*M mean/std =', (
+                            float(_coef.mean().item()),
+                            float(_coef.std().item()),
+                        ))
+                        print('[B2 GATE] grad norm =',
+                              math.sqrt(_gate_grad_sq))
+                        print('[B2 TRAIN] group LRs =', [
+                            (group.get('name'), group['lr'])
+                            for group in optimizers[0].param_groups
+                        ])
+                    del total_loss, det_only, loss_dict_det, outputs_det
+                    torch.cuda.empty_cache()
+                elif _exp_loop == 'B1':
                     loss_dict_det, outputs_det = model_det(
                         images, img_metas, s_targets,
                         mode_training=13,
