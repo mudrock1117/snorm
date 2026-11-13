@@ -676,26 +676,41 @@ def main(det_cfg, args):
         '/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/'
         's0_dbias_color_E2_zdh/E2/best.pth'
     )
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1':
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2'):
+        _protected_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
         if os.path.abspath(_load_path or '') != _b1_checkpoint:
             raise RuntimeError(
-                'B1 must initialize from the fixed E2 baseline checkpoint: %s'
-                % _b1_checkpoint
+                '%s must initialize from fixed E2 checkpoint: %s'
+                % (_protected_exp, _b1_checkpoint)
             )
         if os.environ.get('SNORM_ABLATION', 'full') != 'full':
-            raise RuntimeError('B1 requires the full six-step AHDR path')
+            raise RuntimeError(
+                '%s requires full six-step AHDR' % _protected_exp
+            )
         if int(os.environ.get('SNORM_STEPS', '6')) != 6:
-            raise RuntimeError('B1 requires SNORM_STEPS=6')
+            raise RuntimeError('%s requires SNORM_STEPS=6' % _protected_exp)
         if abs(float(os.environ.get('SNORM_RES_W', '0.6')) - 0.6) > 1e-12:
-            raise RuntimeError('B1 baseline preservation requires SNORM_RES_W=0.6')
+            raise RuntimeError(
+                '%s requires SNORM_RES_W=0.6' % _protected_exp
+            )
         if list(det_cfg.DATASETS.TRAINS) != ['bdd_daytime_clear_train']:
-            raise RuntimeError('B1 training must remain clear-source-only')
+            raise RuntimeError(
+                '%s training must remain clear-source-only' % _protected_exp
+            )
         if list(det_cfg.DATASETS.TESTS) != [
                 'bdd_daytime_fog_test', 'bdd_night_sun_test']:
-            raise RuntimeError('B1 Fog/Night evaluation protocol changed')
+            raise RuntimeError(
+                '%s Fog/Night evaluation protocol changed' % _protected_exp
+            )
+        if (
+                _protected_exp == 'B2'
+                and not bool(det_cfg.B2_OBJECT_AWARE.ENABLED)):
+            raise RuntimeError('B2_OBJECT_AWARE.ENABLED must be True')
     print('[EXPERIMENT START]')
     print('experiment =', (
-        'B1_PROTECTED_SMALLANCHOR_SELECTIVE_AHDR'
+        'B2_OBJECT_AWARE_SELECTIVE_AHDR'
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B2'
+        else 'B1_PROTECTED_SMALLANCHOR_SELECTIVE_AHDR'
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1'
         else 'A4_PROTECTED_RPN'
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'A4'
