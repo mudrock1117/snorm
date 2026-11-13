@@ -112,6 +112,7 @@ class SourceAdaptiveDiversification(object):
             x = x.clamp_min(1e-6).pow(gamma).clamp(0, 1)
 
         sigma = random.uniform(*self.cfg.DEGRADATION.BLUR_SIGMA)
+        sigma = min(sigma, float(self.cfg.DEGRADATION.BLUR_SIGMA_MAX))
         noise_std = random.uniform(*self.cfg.DEGRADATION.NOISE_STD)
         attenuation = random.uniform(*self.cfg.DEGRADATION.ATTENUATION)
         protection = 1.0
