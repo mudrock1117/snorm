@@ -359,3 +359,38 @@ python -m torch.distributed.launch --nproc_per_node=3 --master_port=29633 \
 ```
 
 预期 formal per-rank/global batch 为 4/12，sampler samples/rank 为 6440，steps/epoch 为 1610。若需用 batch4 重跑完整 protected audit，增加 `--execution-batch-size 4`。
+
+
+## B2 Object-Aware Selective-AHDR audit
+
+B2 使用独立分支、配置和工作目录；训练仍仅使用 clear source GT，Fog/Night 只进入 VOC evaluation。先在 GPU1 执行单卡数学、mask、梯度与冻结审计：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 SNORM_EXPERIMENT=B2 \
+python tools/check_b2_object_aware.py \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color_B2_object_aware_ahdr_ddp3.yaml \
+  --checkpoint /home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/s0_dbias_color_E2_zdh/E2/best.pth
+```
+
+再检查三卡正式 DataLoader 语义（per-rank 4、global 12、19318 张时 1610 steps/epoch）：
+
+```bash
+CUDA_VISIBLE_DEVICES=1,2,3 SNORM_EXPERIMENT=B2 \
+python -m torch.distributed.launch --nproc_per_node=3 --master_port=29641 \
+  tools/check_b2_ddp.py --config-only \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color_B2_object_aware_ahdr_ddp3.yaml \
+  --checkpoint /home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/s0_dbias_color_E2_zdh/E2/best.pth
+```
+
+最后执行轻量真实 DDP protected-update audit（默认每 rank 执行 batch 1，不代表正式 batch）：
+
+```bash
+CUDA_VISIBLE_DEVICES=1,2,3 SNORM_EXPERIMENT=B2 \
+python -m torch.distributed.launch --nproc_per_node=3 --master_port=29642 \
+  tools/check_b2_ddp.py \
+  --config-file configs/dbias/city_2_foggy/domain_det_s0_moe_bn_color_B2_object_aware_ahdr_ddp3.yaml \
+  --checkpoint /home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/s0_dbias_color_E2_zdh/E2/best.pth
+```
+
+所有 audit 均通过前不启动正式训练。B2 输出目录为
+`./debug/city_2_foggy/s0_dbias_color_B2_object_aware_ahdr_ddp3/E2`。
