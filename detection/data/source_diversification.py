@@ -76,14 +76,21 @@ class SourceAdaptiveDiversification(object):
             float(self.cfg.OBJECT_PROTECTION.BOX_EXPAND_RATIO),
             float(self.cfg.OBJECT_PROTECTION.SMALL_AREA_RATIO),
         )
+        valid_mask = torch.zeros(b, 1, ph, pw, device=x.device, dtype=x.dtype)
+        for bi, size in enumerate(valid_sizes):
+            valid_w, valid_h = int(size[0]), int(size[1])
+            valid_mask[bi, :, :valid_h, :valid_w] = 1
         lum = x.mean(1, keepdim=True)
         mean = float(lum.mean().item())
         contrast = float(lum.std().item())
         grad = float(_gradient_energy(x).item())
         # Continuous source-content safety factors; no target statistics.
-        dark_safety = min(1.0, max(0.25, mean / float(self.cfg.SOURCE_ADAPTIVE.DARK_REFERENCE)))
-        contrast_safety = min(1.0, max(0.25, contrast / float(self.cfg.SOURCE_ADAPTIVE.CONTRAST_REFERENCE)))
-        detail_safety = min(1.0, max(0.25, grad / float(self.cfg.SOURCE_ADAPTIVE.GRADIENT_REFERENCE)))
+        if bool(self.cfg.SOURCE_ADAPTIVE.ENABLED):
+            dark_safety = min(1.0, max(0.25, mean / float(self.cfg.SOURCE_ADAPTIVE.DARK_REFERENCE)))
+            contrast_safety = min(1.0, max(0.25, contrast / float(self.cfg.SOURCE_ADAPTIVE.CONTRAST_REFERENCE)))
+            detail_safety = min(1.0, max(0.25, grad / float(self.cfg.SOURCE_ADAPTIVE.GRADIENT_REFERENCE)))
+        else:
+            dark_safety = contrast_safety = detail_safety = 1.0
 
         brightness = random.uniform(*self.cfg.PHOTOMETRIC.BRIGHTNESS)
         if brightness < 1:
@@ -141,7 +148,7 @@ class SourceAdaptiveDiversification(object):
                              (local_variant - local_low)).clamp(0, 1)
             x = x + protection * (local_variant - x)
 
-        x = x.clamp(0, 1)
+        x = (x * valid_mask + original * (1.0 - valid_mask)).clamp(0, 1)
         if not bool(torch.isfinite(x).all().item()):
             raise FloatingPointError("C1 augmentation produced NaN/Inf")
         stats = {
