@@ -536,12 +536,14 @@ a3_controller=None):
             'SNORM_EXPERIMENT', 'E0'
         )
         _is_b1_ddp = (
-            _protected_ddp_exp in ('B1', 'B2')
+            _protected_ddp_exp in ('B1', 'B2', 'C1')
             and dist_utils.get_world_size() > 1
         )
         if _is_b1_ddp:
             _eval_env_name = (
-                'B2_DDP_EVAL_STEPS'
+                'C1_DDP_EVAL_STEPS'
+                if _protected_ddp_exp == 'C1'
+                else 'B2_DDP_EVAL_STEPS'
                 if _protected_ddp_exp == 'B2'
                 else 'B1_DDP_EVAL_STEPS'
             )
@@ -626,7 +628,7 @@ def main(det_cfg, args):
                                       batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=det_cfg.DATALOADER.NUM_WORKERS, shuffle=False)
         target_loader = build_data_loaders(det_cfg.DATASETS.TARGETS, transforms=det_cfg.INPUT.TRANSFORMS_TRAIN, is_train=True, distributed=args.distributed,
                                        batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=0, shuffle=True)
-        if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2'):
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1'):
             _configured_batch = int(det_cfg.SOLVER.BATCH_SIZE)
             _loader_batch = int(train_loader.batch_sampler.batch_size)
             if _loader_batch != _configured_batch:
