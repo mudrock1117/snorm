@@ -118,7 +118,7 @@ def main():
 
     dist_utils.init_distributed_mode(args)
     if not args.distributed:
-        raise RuntimeError("check_b1_ddp.py must run under distributed launch")
+        raise RuntimeError("check_b2_ddp.py must run under distributed launch")
     rank = dist_utils.get_rank()
     world_size = dist_utils.get_world_size()
     if world_size != 3:
