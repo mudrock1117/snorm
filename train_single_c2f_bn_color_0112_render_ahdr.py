@@ -514,13 +514,21 @@ a3_controller=None):
                 writer.add_scalar('lr_model', optimizers[0].param_groups[0]['lr'], global_step=global_step)
                 writer.add_scalar('LAMBDA', LAMBDA, global_step=global_step)
 
+        _protected_ddp_exp = os.environ.get(
+            'SNORM_EXPERIMENT', 'E0'
+        )
         _is_b1_ddp = (
-            os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B1'
+            _protected_ddp_exp in ('B1', 'B2')
             and dist_utils.get_world_size() > 1
         )
         if _is_b1_ddp:
+            _eval_env_name = (
+                'B2_DDP_EVAL_STEPS'
+                if _protected_ddp_exp == 'B2'
+                else 'B1_DDP_EVAL_STEPS'
+            )
             _eval_steps_text = os.environ.get(
-                'B1_DDP_EVAL_STEPS', '500,1000,1500,1650,2000'
+                _eval_env_name, '500,1000,1500,1650,2000'
             )
             _eval_steps = set(
                 int(value.strip())
@@ -547,7 +555,8 @@ a3_controller=None):
                 save_func('best.pth', 'sum_mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
             if dist_utils.is_main_process():
                 print(
-                    '[B1 EVAL] step={} fog={:.4f} night={:.4f} sum={:.4f}'.format(
+                    '[{} EVAL] step={} fog={:.4f} night={:.4f} sum={:.4f}'.format(
+                        _protected_ddp_exp,
                         global_step, current_foggy_mAP,
                         current_night_mAP,
                         current_foggy_mAP + current_night_mAP,
