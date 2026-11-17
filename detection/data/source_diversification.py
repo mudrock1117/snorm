@@ -62,11 +62,71 @@ class SourceAdaptiveDiversification(object):
     def __init__(self, cfg):
         self.cfg = cfg
 
+    def _select_augmentations(self):
+        composition = self.cfg.COMPOSITION
+        if not bool(composition.ENABLED):
+            selected = []
+            if bool(self.cfg.PHOTOMETRIC.ENABLED):
+                selected.extend([
+                    "brightness", "contrast", "gamma", "saturation"
+                ])
+            if bool(self.cfg.DEGRADATION.ENABLED):
+                selected.extend(["blur", "noise", "attenuation"])
+            if bool(self.cfg.DETAIL.ENABLED):
+                selected.append("detail")
+            if bool(self.cfg.LOCAL.ENABLED):
+                selected.append("local")
+            return selected
+
+        selected = []
+        groups = (
+            (
+                "photometric",
+                ("brightness", "contrast", "gamma", "saturation"),
+                bool(self.cfg.PHOTOMETRIC.ENABLED),
+                float(composition.PHOTOMETRIC_PROB),
+                int(composition.PHOTOMETRIC_MAX_COUNT),
+            ),
+            (
+                "degradation",
+                ("blur", "noise", "attenuation"),
+                bool(self.cfg.DEGRADATION.ENABLED),
+                float(composition.DEGRADATION_PROB),
+                int(composition.DEGRADATION_MAX_COUNT),
+            ),
+            (
+                "detail_local",
+                ("detail", "local"),
+                bool(self.cfg.DETAIL.ENABLED) or bool(self.cfg.LOCAL.ENABLED),
+                float(composition.DETAIL_LOCAL_PROB),
+                int(composition.DETAIL_LOCAL_MAX_COUNT),
+            ),
+        )
+        for group_name, names, enabled, probability, maximum in groups:
+            if not enabled or maximum <= 0 or random.random() >= probability:
+                continue
+            available = []
+            for name in names:
+                if name == "detail" and not bool(self.cfg.DETAIL.ENABLED):
+                    continue
+                if name == "local" and not bool(self.cfg.LOCAL.ENABLED):
+                    continue
+                available.append(name)
+            count = min(maximum, len(available))
+            if count > 0:
+                selected.extend(random.sample(available, count))
+        maximum_total = max(0, int(composition.MAX_AUGS_PER_IMAGE))
+        if len(selected) > maximum_total:
+            selected = random.sample(selected, maximum_total)
+        return selected
+
     def __call__(self, images, img_metas, targets):
         if not bool(self.cfg.ENABLED):
             return images, {"applied": False}
         if random.random() >= float(self.cfg.APPLY_PROB):
             return images, {"applied": False}
+        selected = self._select_augmentations()
+        selected_set = set(selected)
         x = (images * 0.5 + 0.5).clamp(0, 1)
         original = x
         b, _, ph, pw = x.shape
@@ -92,51 +152,80 @@ class SourceAdaptiveDiversification(object):
         else:
             dark_safety = contrast_safety = detail_safety = 1.0
 
-        brightness = random.uniform(*self.cfg.PHOTOMETRIC.BRIGHTNESS)
+        brightness = (
+            random.uniform(*self.cfg.PHOTOMETRIC.BRIGHTNESS)
+            if "brightness" in selected_set else 1.0
+        )
         if brightness < 1:
             brightness = 1 - (1 - brightness) * dark_safety
-        contrast_factor = random.uniform(*self.cfg.PHOTOMETRIC.CONTRAST)
+        contrast_factor = (
+            random.uniform(*self.cfg.PHOTOMETRIC.CONTRAST)
+            if "contrast" in selected_set else 1.0
+        )
         if contrast_factor < 1:
             contrast_factor = 1 - (1 - contrast_factor) * contrast_safety
-        gamma = random.uniform(*self.cfg.PHOTOMETRIC.GAMMA)
+        gamma = (
+            random.uniform(*self.cfg.PHOTOMETRIC.GAMMA)
+            if "gamma" in selected_set else 1.0
+        )
         if gamma > 1:
             gamma = 1 + (gamma - 1) * dark_safety
-        saturation = random.uniform(*self.cfg.PHOTOMETRIC.SATURATION)
+        saturation = (
+            random.uniform(*self.cfg.PHOTOMETRIC.SATURATION)
+            if "saturation" in selected_set else 1.0
+        )
 
-        if bool(self.cfg.PHOTOMETRIC.ENABLED):
+        if "brightness" in selected_set:
             x = (x * brightness).clamp(0, 1)
+        if "contrast" in selected_set:
             channel_mean = x.mean((2, 3), keepdim=True)
             x = ((x - channel_mean) * contrast_factor + channel_mean).clamp(0, 1)
+        if "saturation" in selected_set:
             gray = x.mean(1, keepdim=True)
             x = (gray + saturation * (x - gray)).clamp(0, 1)
+        if "gamma" in selected_set:
             x = x.clamp_min(1e-6).pow(gamma).clamp(0, 1)
 
-        sigma = random.uniform(*self.cfg.DEGRADATION.BLUR_SIGMA)
+        sigma = (
+            random.uniform(*self.cfg.DEGRADATION.BLUR_SIGMA)
+            if "blur" in selected_set else 0.0
+        )
         sigma = min(sigma, float(self.cfg.DEGRADATION.BLUR_SIGMA_MAX))
-        noise_std = random.uniform(*self.cfg.DEGRADATION.NOISE_STD)
-        attenuation = random.uniform(*self.cfg.DEGRADATION.ATTENUATION)
+        noise_std = (
+            random.uniform(*self.cfg.DEGRADATION.NOISE_STD)
+            if "noise" in selected_set else 0.0
+        )
+        attenuation = (
+            random.uniform(*self.cfg.DEGRADATION.ATTENUATION)
+            if "attenuation" in selected_set else 0.0
+        )
         protection = 1.0
         if bool(self.cfg.OBJECT_PROTECTION.ENABLED):
             protection = (1.0 - float(self.cfg.OBJECT_PROTECTION.LAMBDA_OBJECT) * obj
                           - float(self.cfg.OBJECT_PROTECTION.LAMBDA_SMALL) * small).clamp(0.15, 1.0)
-        if bool(self.cfg.DEGRADATION.ENABLED):
+        if "blur" in selected_set:
             blurred = _blur(x, sigma)
             x = x + protection * (blurred - x)
+        if "noise" in selected_set:
             noise = torch.randn_like(x) * noise_std
             x = x + protection * noise
+        if "attenuation" in selected_set:
             airlight = x.mean((2, 3), keepdim=True)
             x = x + protection * attenuation * (airlight - x)
 
-        detail_k = random.uniform(*self.cfg.DETAIL.K)
+        detail_k = (
+            random.uniform(*self.cfg.DETAIL.K)
+            if "detail" in selected_set else 1.0
+        )
         if detail_k < 1:
             detail_k = 1 - (1 - detail_k) * detail_safety
-        if bool(self.cfg.DETAIL.ENABLED):
+        if "detail" in selected_set:
             low = _blur(x, float(self.cfg.DETAIL.SIGMA))
             detailed = low + detail_k * (x - low)
             x = x + protection * (detailed - x)
 
         local_coverage = 0.0
-        if bool(self.cfg.LOCAL.ENABLED):
+        if "local" in selected_set:
             gh, gw = int(self.cfg.LOCAL.GRID_H), int(self.cfg.LOCAL.GRID_W)
             coarse = torch.rand(b, 1, gh, gw, device=x.device, dtype=x.dtype)
             local = F.interpolate(coarse, size=(ph, pw), mode="bilinear", align_corners=False)
@@ -165,6 +254,24 @@ class SourceAdaptiveDiversification(object):
             "augmented_std": float(x.std().item()),
             "gradient_before": grad,
             "gradient_after": float(_gradient_energy(x).item()),
+            "selected_augmentations": list(selected),
+            "augmentation_count": len(selected),
+            "selected_groups": sorted(set(
+                "photometric" if name in (
+                    "brightness", "contrast", "gamma", "saturation"
+                ) else "degradation" if name in (
+                    "blur", "noise", "attenuation"
+                ) else "detail_local"
+                for name in selected
+            )),
+            "skipped_augmentations": [
+                name for name in (
+                    "brightness", "contrast", "gamma", "saturation",
+                    "blur", "noise", "attenuation", "detail", "local"
+                ) if name not in selected_set
+            ],
             "object_mask": obj, "small_mask": small,
         }
         return (x - 0.5) / 0.5, stats
+
+
