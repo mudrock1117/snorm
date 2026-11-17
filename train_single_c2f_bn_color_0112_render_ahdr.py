@@ -595,7 +595,7 @@ a3_controller=None):
     for name, m in model_inner.named_modules():
         if type(m).__name__ == 'SNorm':
             snorm_modules.append((name, m))
-    _a3_active = os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A3', 'A4', 'B1', 'B2', 'C1')
+    _a3_active = os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A3', 'A4', 'B1', 'B2')
     for name, m in snorm_modules:
         if _a3_active:
             continue
@@ -617,7 +617,7 @@ a3_controller=None):
         else:
             model_det.teacher.proj_norm.compute_norm_parameters(device=device)
     elif _a3_active:
-        print('[A3/A4/B1/B2/C1] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
+        print('[A3/A4/B1/B2] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
 
 def main(det_cfg, args):
     print('----num_workers:', det_cfg.DATALOADER.NUM_WORKERS)
@@ -636,9 +636,9 @@ def main(det_cfg, args):
                     '%s DataLoader batch mismatch: cfg=%s loader=%s'
                     % (os.environ.get('SNORM_EXPERIMENT', 'E0'), _configured_batch, _loader_batch)
                 )
-            if args.distributed and _configured_batch != 4:
+            if args.distributed and _configured_batch != 2:
                 raise RuntimeError(
-                    '%s DDP requires per-rank SOLVER.BATCH_SIZE=4; got %s'
+                    '%s DDP requires per-rank SOLVER.BATCH_SIZE=2; got %s'
                     % (os.environ.get('SNORM_EXPERIMENT', 'E0'), _configured_batch)
                 )
             if dist_utils.is_main_process():
@@ -668,10 +668,20 @@ def main(det_cfg, args):
     if (
             args.distributed
             and os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1')):
-        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B2':
+        _pre_ddp_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
+        if _pre_ddp_exp == 'B2':
             configure_b2_trainable_parameters(model_det)
-        elif os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C1':
-            configure_a3_trainable_parameters(model_det)
+        elif _pre_ddp_exp == 'C1':
+            _pre_ddp_teacher = model_det.teacher
+            for p in _pre_ddp_teacher.backbone_0.parameters(): p.requires_grad_(False)
+            for p in _pre_ddp_teacher.backbone_1.parameters(): p.requires_grad_(False)
+            for p in _pre_ddp_teacher.backbone_2.parameters(): p.requires_grad_(False)
+            for p in _pre_ddp_teacher.backbone_3.parameters(): p.requires_grad_(True)
+            for p in _pre_ddp_teacher.proj_norm.parameters(): p.requires_grad_(False)
+            for p in _pre_ddp_teacher.rpn_norm.parameters(): p.requires_grad_(True)
+            for p in _pre_ddp_teacher.box_head_norm.parameters(): p.requires_grad_(True)
+            for p in model_det.dis.parameters(): p.requires_grad_(False)
+            print('[C1 PRE-DDP] applied E2 detector requires_grad policy')
         else:
             configure_b1_trainable_parameters(model_det)
     
@@ -703,16 +713,16 @@ def main(det_cfg, args):
         ).decode('utf-8').strip()
     except Exception:
         _git_sha = 'unavailable'
-    _b1_checkpoint = (
+    _fixed_e2_checkpoint = (
         '/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/'
-        's0_dbias_color_E2_zdh/E2/best.pth'
+        's0_dbias_color_E2_zdh_parallel/E2/best.pth'
     )
     if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1'):
         _protected_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
-        if os.path.abspath(_load_path or '') != _b1_checkpoint:
+        if os.path.abspath(_load_path or '') != _fixed_e2_checkpoint:
             raise RuntimeError(
                 '%s must initialize from fixed E2 checkpoint: %s'
-                % (_protected_exp, _b1_checkpoint)
+                % (_protected_exp, _fixed_e2_checkpoint)
             )
         if os.environ.get('SNORM_ABLATION', 'full') != 'full':
             raise RuntimeError(
@@ -733,9 +743,17 @@ def main(det_cfg, args):
             raise RuntimeError(
                 '%s Fog/Night evaluation protocol changed' % _protected_exp
             )
-        if (_protected_exp == 'C1'
-                and not bool(det_cfg.C1_SOURCE_DIVERSIFICATION.ENABLED)):
-            raise RuntimeError('C1_SOURCE_DIVERSIFICATION.ENABLED must be True')
+        if _protected_exp == 'C1':
+            if _anchor_sizes != (64, 128, 256, 512):
+                raise RuntimeError(
+                    'C1 must use original 12-anchor configuration '
+                    '(64, 128, 256, 512), got %s'
+                    % (str(_anchor_sizes),)
+                )
+            if not bool(det_cfg.C1_SOURCE_DIVERSIFICATION.ENABLED):
+                raise RuntimeError(
+                    'C1_SOURCE_DIVERSIFICATION.ENABLED must be True'
+                )
         if (
                 _protected_exp == 'B2'
                 and not bool(det_cfg.B2_OBJECT_AWARE.ENABLED)):
@@ -857,15 +875,43 @@ def main(det_cfg, args):
                       extra_trainable_names=_gate_names,
                   )
               elif _exp == 'C1':
-                  if not _is_small_anchor_a:
-                      raise RuntimeError('C1 requires protected 32-anchor layout')
-                  _c1_parameters = configure_a3_trainable_parameters(model_without_ddp)
+                  print('  [C1] 12-anchor source diversification; detector training policy = E2')
+                  for p in _teacher.backbone_0.parameters(): p.requires_grad_(False)
+                  for p in _teacher.backbone_1.parameters(): p.requires_grad_(False)
+                  for p in _teacher.backbone_2.parameters(): p.requires_grad_(False)
+                  for p in _teacher.backbone_3.parameters(): p.requires_grad_(True)
+                  for p in _teacher.proj_norm.parameters(): p.requires_grad_(False)
+                  for p in _teacher.rpn_norm.parameters(): p.requires_grad_(True)
+                  for p in _teacher.box_head_norm.parameters(): p.requires_grad_(True)
+                  for p in _dis.parameters(): p.requires_grad_(False)
+
+                  _b3p = _count(_teacher.backbone_3.parameters())
+                  _rp = _count(_teacher.rpn_norm.parameters())
+                  _bp = _count(_teacher.box_head_norm.parameters())
+
+                  print('  [C1] backbone_3 params:', _b3p,
+                        'rpn_norm params:', _rp,
+                        'box_head_norm params:', _bp)
+                  print('  [C1] backbone_3 lr:', _base_lr * 0.1,
+                        'detector head lr:', _base_lr)
+
                   model_paramters += [{
-                      'params': _c1_parameters,
-                      'lr': _base_lr,
-                      'name': 'c1_new_32_anchor_output_channels',
+                      'params': _teacher.backbone_3.parameters(),
+                      'lr': _base_lr * 0.1,
+                      'name': 'c1_backbone_3',
                   }]
-                  a3_controller = ProtectedSmallAnchorStep(model_without_ddp)
+                  model_paramters += [{
+                      'params': _teacher.rpn_norm.parameters(),
+                      'lr': _base_lr,
+                      'name': 'c1_rpn_norm',
+                  }]
+                  model_paramters += [{
+                      'params': _teacher.box_head_norm.parameters(),
+                      'lr': _base_lr,
+                      'name': 'c1_box_head_norm',
+                  }]
+
+                  a3_controller = None
               elif _exp == 'A4':
                   if not _is_small_anchor_a:
                       raise RuntimeError('A4 requires anchor sizes (32,64,128,256,512)')
@@ -981,7 +1027,7 @@ def main(det_cfg, args):
                   audit_a3_trainable_parameters(model_without_ddp, optimizer_model)
           _total_epochs = det_cfg.SOLVER.EPOCHS
           _t_max = max(1, _total_epochs * len(train_loader))
-          if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A4', 'B1', 'B2', 'C1'):
+          if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('A4', 'B1', 'B2'):
               _a4_min_factor = 1e-6 / A4_OUTPUT_LR
               def _a4_lr_factor(_step):
                   _progress = min(float(_step), float(_t_max)) / float(_t_max)
