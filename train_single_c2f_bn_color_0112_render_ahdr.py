@@ -416,6 +416,90 @@ a3_controller=None):
                         ])
                     del total_loss, det_only, loss_dict_det, outputs_det
                     torch.cuda.empty_cache()
+                elif _exp_loop == 'C3V2':
+                    loss_dict_det, outputs_det = model_det(
+                        tr_images, img_metas, s_targets,
+                        mode_training=16, step_iter=global_step,
+                        is_update=False,
+                    )
+                    required_detection_losses = {
+                        'rpn_cls_loss_w', 'rpn_reg_loss_w',
+                        'rcnn_cls_loss_w', 'rcnn_reg_loss_w',
+                    }
+                    missing = sorted(
+                        required_detection_losses - set(loss_dict_det.keys())
+                    )
+                    if missing:
+                        raise RuntimeError(
+                            'C3-V2 source detection losses missing: %s' % missing
+                        )
+                    selected_detection_loss = sum(
+                        value for key, value in loss_dict_det.items()
+                        if key != 'c3v2_benefit_predictor'
+                    )
+                    total_loss = sum(loss_dict_det.values())
+                    total_loss.backward()
+                    metric_logger.update(det_loss_s=total_loss)
+                    if (dist_utils.is_main_process()
+                            and global_step % max(
+                                1, int(
+                                    det_cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.LOG_INTERVAL
+                                )
+                            ) == 0):
+                        c3v2 = outputs_det['c3v2']
+                        alpha = c3v2['alpha'].detach().view(-1)
+                        logits = c3v2['logits'].detach().view(-1)
+                        benefit = c3v2['benefit'].detach().view(-1)
+                        positive = c3v2['benefit_target'].detach().view(-1)
+                        positive_mask = positive > 0.5
+                        negative_mask = ~positive_mask
+                        alpha_pos = (
+                            float(alpha[positive_mask].mean().item())
+                            if bool(positive_mask.any().item()) else float('nan')
+                        )
+                        alpha_neg = (
+                            float(alpha[negative_mask].mean().item())
+                            if bool(negative_mask.any().item()) else float('nan')
+                        )
+                        alpha_gap = (
+                            alpha_pos - alpha_neg
+                            if alpha_pos == alpha_pos and alpha_neg == alpha_neg
+                            else float('nan')
+                        )
+                        print(
+                            '[C3V2 TRAIN] step={} total={:.6f} '
+                            'selected_det={:.6f}'.format(
+                                global_step, float(total_loss.detach().item()),
+                                float(selected_detection_loss.detach().item()),
+                            )
+                        )
+                        print('[C3V2 ALPHA] mean/std/min/max =', (
+                            float(alpha.mean().item()),
+                            float(alpha.std(unbiased=False).item()),
+                            float(alpha.min().item()),
+                            float(alpha.max().item()),
+                        ))
+                        print('[C3V2 ALPHA] pos/neg/gap logit_std =', (
+                            alpha_pos, alpha_neg, alpha_gap,
+                            float(logits.std(unbiased=False).item()),
+                        ))
+                        print('[C3V2 BENEFIT] mean/std/positive/negative =', (
+                            float(benefit.mean().item()),
+                            float(benefit.std(unbiased=False).item()),
+                            float(positive.mean().item()),
+                            float((1.0 - positive).mean().item()),
+                        ))
+                        print('[C3V2 BENEFIT] predictor_loss/accuracy =', (
+                            float(c3v2['predictor_loss'].item()),
+                            float(c3v2['predictor_accuracy'].item()),
+                        ))
+                        print('[C3V2 DETECTION] base/ahdr =', (
+                            float(c3v2['base_detection_loss'].mean().item()),
+                            float(c3v2['ahdr_detection_loss'].mean().item()),
+                        ))
+                    del total_loss, selected_detection_loss
+                    del loss_dict_det, outputs_det
+                    torch.cuda.empty_cache()
                 elif _exp_loop == 'C3':
                     loss_dict_det, outputs_det = model_det(
                         tr_images, img_metas, s_targets,
@@ -613,12 +697,14 @@ a3_controller=None):
             'SNORM_EXPERIMENT', 'E0'
         )
         _is_b1_ddp = (
-            _protected_ddp_exp in ('B1', 'B2', 'C1', 'C2', 'C3')
+            _protected_ddp_exp in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2')
             and dist_utils.get_world_size() > 1
         )
         if _is_b1_ddp:
             _eval_env_name = (
-                'C3_DDP_EVAL_STEPS'
+                'C3V2_DDP_EVAL_STEPS'
+                if _protected_ddp_exp == 'C3V2'
+                else 'C3_DDP_EVAL_STEPS'
                 if _protected_ddp_exp == 'C3'
                 else 'C2_DDP_EVAL_STEPS'
                 if _protected_ddp_exp == 'C2'
@@ -644,8 +730,13 @@ a3_controller=None):
             _should_evaluate = global_step % _eval_interval == 0
         if _should_evaluate and test_func is not None:
             if _is_b1_ddp:
+                _step_checkpoint_name = (
+                    'model_step_latest.pth'
+                    if _protected_ddp_exp == 'C3V2'
+                    else 'model_step_{:06d}.pth'.format(global_step)
+                )
                 save_func(
-                    'model_step_{:06d}.pth'.format(global_step),
+                    _step_checkpoint_name,
                     'pre-evaluation checkpoint at global step {}'.format(
                         global_step
                     ),
@@ -709,7 +800,7 @@ def main(det_cfg, args):
                                       batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=det_cfg.DATALOADER.NUM_WORKERS, shuffle=False)
         target_loader = build_data_loaders(det_cfg.DATASETS.TARGETS, transforms=det_cfg.INPUT.TRANSFORMS_TRAIN, is_train=True, distributed=args.distributed,
                                        batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=0, shuffle=True)
-        if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3'):
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2'):
             _configured_batch = int(det_cfg.SOLVER.BATCH_SIZE)
             _loader_batch = int(train_loader.batch_sampler.batch_size)
             if _loader_batch != _configured_batch:
@@ -748,13 +839,13 @@ def main(det_cfg, args):
     # are constructed. The later optimizer setup repeats this idempotently.
     if (
             args.distributed
-            and os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3')):
+            and os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2')):
         _pre_ddp_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
         if _pre_ddp_exp == 'B2':
             configure_b2_trainable_parameters(model_det)
-        elif _pre_ddp_exp in ('C1', 'C2', 'C3'):
+        elif _pre_ddp_exp in ('C1', 'C2', 'C3', 'C3V2'):
             _pre_ddp_teacher = model_det.teacher
-            if _pre_ddp_exp == 'C3':
+            if _pre_ddp_exp in ('C3', 'C3V2'):
                 for p in _pre_ddp_teacher.parameters():
                     p.requires_grad_(False)
             for p in _pre_ddp_teacher.backbone_0.parameters(): p.requires_grad_(False)
@@ -766,6 +857,9 @@ def main(det_cfg, args):
             for p in _pre_ddp_teacher.box_head_norm.parameters(): p.requires_grad_(True)
             if _pre_ddp_exp == 'C3':
                 for p in _pre_ddp_teacher.detection_benefit_predictor.parameters():
+                    p.requires_grad_(True)
+            elif _pre_ddp_exp == 'C3V2':
+                for p in _pre_ddp_teacher.detection_semantic_benefit_predictor.parameters():
                     p.requires_grad_(True)
             for p in model_det.dis.parameters(): p.requires_grad_(False)
             print('[{} PRE-DDP] applied E2 detector requires_grad policy'.format(
@@ -806,7 +900,7 @@ def main(det_cfg, args):
         '/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/'
         's0_dbias_color_E2_zdh_parallel/E2/best.pth'
     )
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3'):
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2'):
         _protected_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
         if os.path.abspath(_load_path or '') != _fixed_e2_checkpoint:
             raise RuntimeError(
@@ -871,13 +965,36 @@ def main(det_cfg, args):
                 raise RuntimeError('C3 must not enable B1/B2 Selective-AHDR')
             if bool(det_cfg.B2_OBJECT_AWARE.ENABLED):
                 raise RuntimeError('C3 must not enable B2 object-aware losses')
+        if _protected_exp == 'C3V2':
+            if _anchor_sizes != (64, 128, 256, 512):
+                raise RuntimeError(
+                    'C3-V2 must use original 12-anchor configuration '
+                    '(64, 128, 256, 512), got %s' % (str(_anchor_sizes),)
+                )
+            if not bool(
+                    det_cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.ENABLED):
+                raise RuntimeError(
+                    'C3V2_DETECTION_SEMANTIC_BENEFIT.ENABLED must be True'
+                )
+            if bool(det_cfg.C3_DETECTION_BENEFIT.ENABLED):
+                raise RuntimeError('C3-V2 must not enable C3-V1 predictor')
+            if bool(det_cfg.C1_SOURCE_DIVERSIFICATION.ENABLED):
+                raise RuntimeError('C3-V2 must not enable C1')
+            if bool(det_cfg.C2_STRUCTURE_GUIDANCE.ENABLED):
+                raise RuntimeError('C3-V2 must not enable C2')
+            if bool(det_cfg.SELECTIVE_AHDR.ENABLED):
+                raise RuntimeError('C3-V2 must not enable B1/B2 Selective-AHDR')
+            if bool(det_cfg.B2_OBJECT_AWARE.ENABLED):
+                raise RuntimeError('C3-V2 must not enable B2 object-aware losses')
         if (
                 _protected_exp == 'B2'
                 and not bool(det_cfg.B2_OBJECT_AWARE.ENABLED)):
             raise RuntimeError('B2_OBJECT_AWARE.ENABLED must be True')
     print('[EXPERIMENT START]')
     print('experiment =', (
-        'C3_DETECTION_BENEFIT_AWARE_AHDR'
+        'C3V2_DETECTION_SEMANTIC_BENEFIT_AHDR'
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C3V2'
+        else 'C3_DETECTION_BENEFIT_AWARE_AHDR'
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C3'
         else 'C2_STRUCTURE_GUIDED_AHDR'
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C2'
@@ -934,6 +1051,24 @@ def main(det_cfg, args):
                         % (sorted(_missing), sorted(_unexpected))
                     )
                 print('[C3 CHECKPOINT] only predictor parameters are new')
+            elif os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C3V2':
+                _allowed_missing = {
+                    'teacher.detection_semantic_benefit_predictor.projection.weight',
+                    'teacher.detection_semantic_benefit_predictor.projection.bias',
+                    'teacher.detection_semantic_benefit_predictor.encoder.weight',
+                    'teacher.detection_semantic_benefit_predictor.encoder.bias',
+                    'teacher.detection_semantic_benefit_predictor.predictor.weight',
+                    'teacher.detection_semantic_benefit_predictor.predictor.bias',
+                }
+                _missing = set(_incompatible.missing_keys)
+                _unexpected = set(_incompatible.unexpected_keys)
+                if _missing != _allowed_missing or _unexpected:
+                    raise RuntimeError(
+                        'C3-V2 checkpoint incompatibility: '
+                        'missing=%s unexpected=%s'
+                        % (sorted(_missing), sorted(_unexpected))
+                    )
+                print('[C3-V2 CHECKPOINT] only semantic predictor parameters are new')
         print('checkpoint load completed')
         if 'current_epoch' in checkpoint and args.use_current_epoch:
             current_epoch = int(checkpoint['current_epoch'])
@@ -943,7 +1078,7 @@ def main(det_cfg, args):
     work_dir = det_cfg.WORK_DIR
     _exp_wd = os.environ.get('SNORM_EXPERIMENT', 'E0')
     if _exp_wd != 'E0':
-        _work_suffix = 'E2' if _exp_wd in ('A3', 'A4', 'B1', 'B2', 'C1', 'C2', 'C3') else _exp_wd
+        _work_suffix = 'E2' if _exp_wd in ('A3', 'A4', 'B1', 'B2', 'C1', 'C2', 'C3', 'C3V2') else _exp_wd
         work_dir = os.path.join(work_dir, _work_suffix)
         os.makedirs(work_dir, exist_ok=True)
         print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
@@ -1012,9 +1147,9 @@ def main(det_cfg, args):
                       model_without_ddp,
                       extra_trainable_names=_gate_names,
                   )
-              elif _exp in ('C1', 'C2', 'C3'):
+              elif _exp in ('C1', 'C2', 'C3', 'C3V2'):
                   print('  [{}] 12-anchor detector training policy = E2'.format(_exp))
-                  if _exp == 'C3':
+                  if _exp in ('C3', 'C3V2'):
                       for p in _teacher.parameters():
                           p.requires_grad_(False)
                   for p in _teacher.backbone_0.parameters(): p.requires_grad_(False)
@@ -1027,6 +1162,9 @@ def main(det_cfg, args):
                   for p in _dis.parameters(): p.requires_grad_(False)
                   if _exp == 'C3':
                       for p in _teacher.detection_benefit_predictor.parameters():
+                          p.requires_grad_(True)
+                  elif _exp == 'C3V2':
+                      for p in _teacher.detection_semantic_benefit_predictor.parameters():
                           p.requires_grad_(True)
 
                   _b3p = _count(_teacher.backbone_3.parameters())
@@ -1066,6 +1204,21 @@ def main(det_cfg, args):
                           'params': _predictor.parameters(),
                           'lr': _predictor_lr,
                           'name': 'c3_detection_benefit_predictor',
+                      }]
+                  elif _exp == 'C3V2':
+                      _predictor = (
+                          _teacher.detection_semantic_benefit_predictor
+                      )
+                      _predictor_lr = float(
+                          det_cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.PREDICTOR_LR
+                      )
+                      _predictor_params = _count(_predictor.parameters())
+                      print('  [C3-V2] semantic predictor params:',
+                            _predictor_params, 'lr:', _predictor_lr)
+                      model_paramters += [{
+                          'params': _predictor.parameters(),
+                          'lr': _predictor_lr,
+                          'name': 'c3v2_detection_semantic_predictor',
                       }]
 
                   a3_controller = None
@@ -1309,7 +1462,10 @@ def main(det_cfg, args):
             
         #if epoch > 10:
         if epoch > -1:
-            save_func()
+            if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C3V2':
+                save_func('model_epoch_latest.pth')
+            else:
+                save_func()
 
         epoch_cost = time.time() - epoch_start
         left = epochs - epoch - 1

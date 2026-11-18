@@ -46,6 +46,45 @@ class DetectionBenefitPredictor(nn.Module):
         return sum(parameter.numel() for parameter in self.parameters())
 
 
+class DetectionSemanticBenefitPredictor(nn.Module):
+    """C3-V2 selector built from existing detector semantic features."""
+
+    def __init__(self, in_channels=1024, projection_channels=32,
+                 hidden_channels=32, initial_alpha=0.9):
+        super().__init__()
+        if initial_alpha <= 0.0 or initial_alpha >= 1.0:
+            raise ValueError('initial_alpha must be strictly between 0 and 1')
+        self.projection = nn.Linear(in_channels, projection_channels)
+        self.encoder = nn.Linear(projection_channels * 3, hidden_channels)
+        self.predictor = nn.Linear(hidden_channels, 1)
+        nn.init.kaiming_uniform_(self.projection.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.projection.bias)
+        nn.init.kaiming_uniform_(self.encoder.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.encoder.bias)
+        nn.init.normal_(self.predictor.weight, mean=0.0, std=1e-3)
+        initial_logit = math.log(initial_alpha / (1.0 - initial_alpha))
+        nn.init.constant_(self.predictor.bias, initial_logit)
+
+    def _project(self, feature):
+        pooled = F.adaptive_avg_pool2d(feature.detach(), 1).flatten(1)
+        return F.relu(self.projection(pooled), inplace=False)
+
+    def forward(self, base_feature, ahdr_feature):
+        base_projected = self._project(base_feature)
+        ahdr_projected = self._project(ahdr_feature)
+        delta_projected = ahdr_projected - base_projected
+        descriptor = torch.cat([
+            base_projected, ahdr_projected, delta_projected
+        ], dim=1)
+        hidden = F.relu(self.encoder(descriptor), inplace=False)
+        logits = self.predictor(hidden)
+        alpha = torch.sigmoid(logits)
+        return alpha[:, :, None, None], logits[:, 0], descriptor
+
+    def parameter_count(self):
+        return sum(parameter.numel() for parameter in self.parameters())
+
+
 def detection_benefit_loss(logits, detached_benefit, margin=0.0):
     target = (detached_benefit > float(margin)).to(dtype=logits.dtype)
     loss = F.binary_cross_entropy_with_logits(logits, target)

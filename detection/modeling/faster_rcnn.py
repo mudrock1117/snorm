@@ -375,6 +375,54 @@ class FasterRCNN(nn.Module):
                 }
                 outputs_teacher = outputs
 
+            ########C3-V2 detection-semantic benefit selector########
+            elif mode_training == 16:
+                if not bool(
+                        self.cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.ENABLED):
+                    raise RuntimeError(
+                        'mode_training=16 requires C3V2 semantic benefit'
+                    )
+                c3v2_output = self.teacher(
+                    tc_images, img_metas, targets_, mode=10,
+                    moe_mode=moe_mode, update_norm_p=False,
+                    is_update=False,
+                )
+                for key, value in c3v2_output['rpn_losses_w'].items():
+                    loss_dict.update({key + '_w': value})
+                for key, value in c3v2_output['box_losses_w'].items():
+                    loss_dict.update({key + '_w': value})
+
+                c3v2 = c3v2_output['c3v2']
+                predictor_loss, benefit_target, accuracy = (
+                    detection_benefit_loss(
+                        c3v2['logits'], c3v2['benefit'].detach(),
+                        margin=float(
+                            self.cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.BENEFIT_MARGIN
+                        ),
+                    )
+                )
+                loss_weight = float(
+                    self.cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.LOSS_WEIGHT
+                )
+                loss_dict['c3v2_benefit_predictor'] = (
+                    loss_weight * predictor_loss
+                )
+                outputs['c3v2'] = {
+                    'alpha': c3v2['alpha'],
+                    'logits': c3v2['logits'],
+                    'benefit': c3v2['benefit'],
+                    'benefit_target': benefit_target.detach(),
+                    'predictor_loss': predictor_loss.detach(),
+                    'predictor_accuracy': accuracy.detach(),
+                    'base_detection_loss': c3v2[
+                        'base_detection_loss'
+                    ].detach(),
+                    'ahdr_detection_loss': c3v2[
+                        'ahdr_detection_loss'
+                    ].detach(),
+                }
+                outputs_teacher = outputs
+
             ########detection + e-net########
             elif mode_training == 1:
                 if stsc_trans is not None:

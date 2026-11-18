@@ -28,7 +28,10 @@ from detection.modeling.discriminator.InDiscriminator import InstanceDiscriminat
 #from detection.modeling.norm.R202503X.SNorm_0322_valid_refine import SNorm
 from detection.modeling.norm.R202509x.SNorm_0322_valid_refine import SNorm
 from detection.modeling.norm.selective_ahdr import SelectiveAHDRGate
-from detection.modeling.norm.detection_benefit import DetectionBenefitPredictor
+from detection.modeling.norm.detection_benefit import (
+    DetectionBenefitPredictor,
+    DetectionSemanticBenefitPredictor,
+)
 #from detection.modeling.norm.R202509x.SNorm_0322_valid_refine_expmamba import SNorm
 
 #
@@ -139,6 +142,38 @@ class ModuleSet(nn.Module):
                 )
             else:
                 self.detection_benefit_predictor = None
+            self.detection_semantic_benefit_enabled = bool(
+                cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.ENABLED
+            )
+            if self.detection_semantic_benefit_enabled:
+                if int(cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.FEATURE_CHANNELS) != int(in_channels):
+                    raise ValueError(
+                        'C3-V2 semantic channels mismatch: config=%s backbone=%s'
+                        % (
+                            cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.FEATURE_CHANNELS,
+                            in_channels,
+                        )
+                    )
+                self.detection_semantic_benefit_predictor = (
+                    DetectionSemanticBenefitPredictor(
+                        in_channels=in_channels,
+                        projection_channels=(
+                            cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.PROJECTION_CHANNELS
+                        ),
+                        hidden_channels=(
+                            cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.HIDDEN_CHANNELS
+                        ),
+                        initial_alpha=(
+                            cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.INITIAL_ALPHA
+                        ),
+                    )
+                )
+                print(
+                    '[C3-V2 DETECTION-SEMANTIC BENEFIT] predictor parameters =',
+                    self.detection_semantic_benefit_predictor.parameter_count(),
+                )
+            else:
+                self.detection_semantic_benefit_predictor = None
             self.selective_ahdr_enabled = bool(cfg.SELECTIVE_AHDR.ENABLED)
             if self.selective_ahdr_enabled:
                 self.selective_ahdr_gate = SelectiveAHDRGate(
@@ -597,6 +632,46 @@ class ModuleSet(nn.Module):
             outputs['c3']['ahdr_detection_loss'] = ahdr_losses
             outputs['c3']['benefit'] = (base_losses - ahdr_losses).detach()
 
+        elif mode == 10:  # C3-V2 semantic benefit training
+            if not self.detection_semantic_benefit_enabled:
+                raise RuntimeError('ModuleSet mode=10 requires C3-V2 predictor')
+            features_prev = self.prev_norm(images)
+            features_norm, feat_dict = self.dist_prog(
+                features_prev.detach(), targets, stride=8, domain=domain,
+                use_dbiase=use_dbiase, moe_mode=moe_mode,
+                moe_mark=moe_mark,
+            )
+            c3v2 = feat_dict['c3v2']
+            base_losses, ahdr_losses = (
+                self._paired_detection_losses_from_features(
+                    images,
+                    c3v2['base_semantic_feature'],
+                    c3v2['ahdr_semantic_feature'],
+                    img_metas,
+                    targets,
+                )
+            )
+
+            features_w = self.back_norm_w_snorm(features_norm)
+            proposals_w, rpn_losses_w, _, _ = self.rpn_norm(
+                images, features_w, img_metas, targets
+            )
+            dets_w, box_losses_w, _, _, _, _, _, _, _ = self.box_head_norm(
+                features_w, proposals_w, img_metas, targets
+            )
+            outputs['dets_w'] = dets_w
+            outputs['features_w'] = features_w
+            outputs['features_norm'] = features_norm
+            outputs['rpn_losses_w'] = rpn_losses_w
+            outputs['box_losses_w'] = box_losses_w
+            outputs['features_prev'] = features_prev
+            outputs['c3v2'] = c3v2
+            outputs['c3v2']['base_detection_loss'] = base_losses
+            outputs['c3v2']['ahdr_detection_loss'] = ahdr_losses
+            outputs['c3v2']['benefit'] = (
+                base_losses - ahdr_losses
+            ).detach()
+
         outputs['feat_dict'] = feat_dict
             
         return outputs
@@ -624,7 +699,8 @@ class ModuleSet(nn.Module):
                 force_eval_render=(
                     (self.selective_ahdr_enabled
                      or self.structure_guided_ahdr_enabled
-                     or self.detection_benefit_enabled)
+                     or self.detection_benefit_enabled
+                     or self.detection_semantic_benefit_enabled)
                     and self.training
                 ),
             )
@@ -651,6 +727,42 @@ class ModuleSet(nn.Module):
                     'logits': logits,
                     'descriptor': descriptor,
                 }
+            if self.detection_semantic_benefit_enabled:
+                required = ('selective_base', 'selective_legacy')
+                missing = [key for key in required if key not in feat_dict]
+                if missing:
+                    raise RuntimeError(
+                        'C3-V2 AHDR endpoints missing: %s' % (missing,)
+                    )
+                base = feat_dict['selective_base']
+                ahdr = feat_dict['selective_legacy']
+                # Reused by the benefit RPN/ROI branches below.  No additional
+                # base/AHDR backbone pass is performed in mode=10.
+                with torch.no_grad():
+                    base_semantic = self.back_norm_w_snorm(base.detach())
+                    ahdr_semantic = self.back_norm_w_snorm(ahdr.detach())
+                alpha, logits, descriptor = (
+                    self.detection_semantic_benefit_predictor(
+                        base_semantic, ahdr_semantic
+                    )
+                )
+                nx = base + alpha.detach() * (ahdr - base)
+                c3v2_payload = {
+                    'base': base,
+                    'ahdr': ahdr,
+                    'selected': nx,
+                    'alpha': alpha,
+                    'logits': logits,
+                    'descriptor': descriptor,
+                }
+                if self.training:
+                    c3v2_payload['base_semantic_feature'] = (
+                        base_semantic.detach()
+                    )
+                    c3v2_payload['ahdr_semantic_feature'] = (
+                        ahdr_semantic.detach()
+                    )
+                feat_dict['c3v2'] = c3v2_payload
             if self.selective_ahdr_enabled:
                 required = ("selective_base", "selective_restored", "selective_legacy")
                 missing = [key for key in required if key not in feat_dict]
@@ -721,6 +833,51 @@ class ModuleSet(nn.Module):
                 self._restore_rng_state(rng_state, sample_images)
                 ahdr_loss = self._single_detection_loss(
                     sample_images, ahdr[index:index + 1].detach(),
+                    sample_meta, sample_targets,
+                )
+                base_values.append(base_loss.detach())
+                ahdr_values.append(ahdr_loss.detach())
+        return torch.stack(base_values), torch.stack(ahdr_values)
+
+    def _single_detection_loss_from_feature(self, images, feature,
+                                            img_metas, targets):
+        proposals, rpn_losses, _, _ = self.rpn_norm(
+            images, feature, img_metas, targets
+        )
+        _, box_losses, _, _, _, _, _, _, _ = self.box_head_norm(
+            feature, proposals, img_metas, targets
+        )
+        missing_rpn = {
+            'rpn_cls_loss', 'rpn_reg_loss'
+        } - set(rpn_losses.keys())
+        missing_roi = {
+            'rcnn_cls_loss', 'rcnn_reg_loss'
+        } - set(box_losses.keys())
+        if missing_rpn or missing_roi:
+            raise RuntimeError(
+                'C3-V2 detection benefit losses missing: rpn=%s roi=%s'
+                % (sorted(missing_rpn), sorted(missing_roi))
+            )
+        return sum(rpn_losses.values()) + sum(box_losses.values())
+
+    def _paired_detection_losses_from_features(
+            self, images, base_feature, ahdr_feature, img_metas, targets):
+        """C3-V2 loss labels reusing already-computed semantic features."""
+        base_values = []
+        ahdr_values = []
+        with torch.no_grad():
+            for index in range(images.size(0)):
+                sample_images = images[index:index + 1]
+                sample_meta = img_metas[index:index + 1]
+                sample_targets = targets[index:index + 1]
+                rng_state = self._capture_rng_state(sample_images)
+                base_loss = self._single_detection_loss_from_feature(
+                    sample_images, base_feature[index:index + 1],
+                    sample_meta, sample_targets,
+                )
+                self._restore_rng_state(rng_state, sample_images)
+                ahdr_loss = self._single_detection_loss_from_feature(
+                    sample_images, ahdr_feature[index:index + 1],
                     sample_meta, sample_targets,
                 )
                 base_values.append(base_loss.detach())
