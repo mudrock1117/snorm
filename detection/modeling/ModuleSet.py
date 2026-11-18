@@ -28,6 +28,7 @@ from detection.modeling.discriminator.InDiscriminator import InstanceDiscriminat
 #from detection.modeling.norm.R202503X.SNorm_0322_valid_refine import SNorm
 from detection.modeling.norm.R202509x.SNorm_0322_valid_refine import SNorm
 from detection.modeling.norm.selective_ahdr import SelectiveAHDRGate
+from detection.modeling.norm.detection_benefit import DetectionBenefitPredictor
 #from detection.modeling.norm.R202509x.SNorm_0322_valid_refine_expmamba import SNorm
 
 #
@@ -123,6 +124,21 @@ class ModuleSet(nn.Module):
                         cfg.C2_STRUCTURE_GUIDANCE.STRENGTH,
                     )
                 )
+            self.detection_benefit_enabled = bool(
+                cfg.C3_DETECTION_BENEFIT.ENABLED
+            )
+            if self.detection_benefit_enabled:
+                self.detection_benefit_predictor = DetectionBenefitPredictor(
+                    channels=3,
+                    hidden_channels=cfg.C3_DETECTION_BENEFIT.HIDDEN_CHANNELS,
+                    initial_alpha=cfg.C3_DETECTION_BENEFIT.INITIAL_ALPHA,
+                )
+                print(
+                    '[C3 DETECTION-BENEFIT] predictor parameters =',
+                    self.detection_benefit_predictor.parameter_count(),
+                )
+            else:
+                self.detection_benefit_predictor = None
             self.selective_ahdr_enabled = bool(cfg.SELECTIVE_AHDR.ENABLED)
             if self.selective_ahdr_enabled:
                 self.selective_ahdr_gate = SelectiveAHDRGate(
@@ -548,6 +564,39 @@ class ModuleSet(nn.Module):
                 if 'attn_masks' in feat_dict.keys():
                     outputs['attn_masks'] = feat_dict['attn_masks']
 
+        elif mode == 9:  # C3 detection-benefit-aware training
+            if not self.detection_benefit_enabled:
+                raise RuntimeError('ModuleSet mode=9 requires C3 predictor')
+            features_prev = self.prev_norm(images)
+            features_norm, feat_dict = self.dist_prog(
+                features_prev.detach(), targets, stride=8, domain=domain,
+                use_dbiase=use_dbiase, moe_mode=moe_mode,
+                moe_mark=moe_mark,
+            )
+            base = feat_dict['c3']['base']
+            ahdr = feat_dict['c3']['ahdr']
+            base_losses, ahdr_losses = self._paired_detection_losses(
+                images, base, ahdr, img_metas, targets
+            )
+
+            features_w = self.back_norm_w_snorm(features_norm)
+            proposals_w, rpn_losses_w, _, _ = self.rpn_norm(
+                images, features_w, img_metas, targets
+            )
+            dets_w, box_losses_w, _, _, _, _, _, _, _ = self.box_head_norm(
+                features_w, proposals_w, img_metas, targets
+            )
+            outputs['dets_w'] = dets_w
+            outputs['features_w'] = features_w
+            outputs['features_norm'] = features_norm
+            outputs['rpn_losses_w'] = rpn_losses_w
+            outputs['box_losses_w'] = box_losses_w
+            outputs['features_prev'] = features_prev
+            outputs['c3'] = feat_dict['c3']
+            outputs['c3']['base_detection_loss'] = base_losses
+            outputs['c3']['ahdr_detection_loss'] = ahdr_losses
+            outputs['c3']['benefit'] = (base_losses - ahdr_losses).detach()
+
         outputs['feat_dict'] = feat_dict
             
         return outputs
@@ -574,10 +623,34 @@ class ModuleSet(nn.Module):
                 targets=targets,
                 force_eval_render=(
                     (self.selective_ahdr_enabled
-                     or self.structure_guided_ahdr_enabled)
+                     or self.structure_guided_ahdr_enabled
+                     or self.detection_benefit_enabled)
                     and self.training
                 ),
             )
+            if self.detection_benefit_enabled:
+                required = ('selective_base', 'selective_legacy')
+                missing = [key for key in required if key not in feat_dict]
+                if missing:
+                    raise RuntimeError(
+                        'C3 AHDR endpoints missing: %s' % (missing,)
+                    )
+                base = feat_dict['selective_base']
+                ahdr = feat_dict['selective_legacy']
+                alpha, logits, descriptor = self.detection_benefit_predictor(
+                    base, ahdr
+                )
+                # Final detection does not train the selector.  Only the
+                # detached, paired detection-benefit target trains it.
+                nx = base + alpha.detach() * (ahdr - base)
+                feat_dict['c3'] = {
+                    'base': base,
+                    'ahdr': ahdr,
+                    'selected': nx,
+                    'alpha': alpha,
+                    'logits': logits,
+                    'descriptor': descriptor,
+                }
             if self.selective_ahdr_enabled:
                 required = ("selective_base", "selective_restored", "selective_legacy")
                 missing = [key for key in required if key not in feat_dict]
@@ -598,6 +671,61 @@ class ModuleSet(nn.Module):
                 nx = self.proj_dbias.read_memory(nx, targets, stride=stride, domain=1)
                 self.pjo_ops.update_memory(x, targets, stride=stride, domain=1)
             return nx, feat_dict
+
+    @staticmethod
+    def _capture_rng_state(images):
+        state = {
+            'python': random.getstate(),
+            'numpy': np.random.get_state(),
+            'torch': torch.get_rng_state(),
+            'cuda': None,
+        }
+        if images.is_cuda:
+            state['cuda'] = torch.cuda.get_rng_state(images.device)
+        return state
+
+    @staticmethod
+    def _restore_rng_state(state, images):
+        random.setstate(state['python'])
+        np.random.set_state(state['numpy'])
+        torch.set_rng_state(state['torch'])
+        if images.is_cuda and state['cuda'] is not None:
+            torch.cuda.set_rng_state(state['cuda'], images.device)
+
+    def _single_detection_loss(self, images, representation,
+                               img_metas, targets):
+        features = self.back_norm_w_snorm(representation)
+        proposals, rpn_losses, _, _ = self.rpn_norm(
+            images, features, img_metas, targets
+        )
+        _, box_losses, _, _, _, _, _, _, _ = self.box_head_norm(
+            features, proposals, img_metas, targets
+        )
+        return sum(rpn_losses.values()) + sum(box_losses.values())
+
+    def _paired_detection_losses(self, images, base, ahdr,
+                                 img_metas, targets):
+        """Per-sample base/AHDR loss with identical proposal sampling RNG."""
+        base_values = []
+        ahdr_values = []
+        with torch.no_grad():
+            for index in range(images.size(0)):
+                sample_images = images[index:index + 1]
+                sample_meta = img_metas[index:index + 1]
+                sample_targets = targets[index:index + 1]
+                rng_state = self._capture_rng_state(sample_images)
+                base_loss = self._single_detection_loss(
+                    sample_images, base[index:index + 1].detach(),
+                    sample_meta, sample_targets,
+                )
+                self._restore_rng_state(rng_state, sample_images)
+                ahdr_loss = self._single_detection_loss(
+                    sample_images, ahdr[index:index + 1].detach(),
+                    sample_meta, sample_targets,
+                )
+                base_values.append(base_loss.detach())
+                ahdr_values.append(ahdr_loss.detach())
+        return torch.stack(base_values), torch.stack(ahdr_values)
     
     def compute_targets_for_locations(self, locations, targets, feats):
         bn, lc, lh, lw = feats.size()

@@ -196,6 +196,18 @@ _C.C2_STRUCTURE_GUIDANCE.BLUR_KERNEL = 3
 _C.C2_STRUCTURE_GUIDANCE.LOG_INTERVAL = 50
 
 # ---------------------------------------------------------------------------- #
+# C3 detection-benefit-aware sample selector (disabled by default)
+# ---------------------------------------------------------------------------- #
+_C.C3_DETECTION_BENEFIT = CN()
+_C.C3_DETECTION_BENEFIT.ENABLED = False
+_C.C3_DETECTION_BENEFIT.HIDDEN_CHANNELS = 16
+_C.C3_DETECTION_BENEFIT.INITIAL_ALPHA = 0.90
+_C.C3_DETECTION_BENEFIT.PREDICTOR_LR = 1e-4
+_C.C3_DETECTION_BENEFIT.LOSS_WEIGHT = 0.10
+_C.C3_DETECTION_BENEFIT.BENEFIT_MARGIN = 0.0
+_C.C3_DETECTION_BENEFIT.LOG_INTERVAL = 50
+
+# ---------------------------------------------------------------------------- #
 # B2 source-only object-aware Gate supervision (disabled by default)
 # ---------------------------------------------------------------------------- #
 _C.B2_OBJECT_AWARE = CN()
