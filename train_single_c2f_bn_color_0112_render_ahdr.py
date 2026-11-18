@@ -416,13 +416,28 @@ a3_controller=None):
                         ])
                     del total_loss, det_only, loss_dict_det, outputs_det
                     torch.cuda.empty_cache()
-                elif _exp_loop in ('E1', 'E2', 'A3', 'A4', 'C1'):
+                elif _exp_loop in ('E1', 'E2', 'A3', 'A4', 'C1', 'C2'):
                     _detector_images = images if _exp_loop == 'C1' else tr_images
                     loss_dict_det, _ = model_det(_detector_images, img_metas, s_targets, mode_training=0, step_iter=global_step, \
                                                 is_update=is_update, stsc_images=sc_images, stsc_trans=sc_trans)
                     det_loss_det = sum(list(loss_dict_det.values()))
                     det_loss_det.backward()
                     metric_logger.update(det_loss_s=det_loss_det)
+                    if (_exp_loop == 'C2' and dist_utils.is_main_process()
+                            and global_step % max(
+                                1, int(det_cfg.C2_STRUCTURE_GUIDANCE.LOG_INTERVAL)
+                            ) == 0):
+                        _inner = (model_det.module if hasattr(model_det, 'module')
+                                  else model_det)
+                        _stats = _inner.teacher.proj_norm._c2_last_stats
+                        if _stats is None:
+                            raise RuntimeError('C2 structure statistics missing')
+                        print('[C2 TRAIN] step={} loss={:.6f} cue={} stats={}'.format(
+                            global_step, float(det_loss_det.detach().item()),
+                            det_cfg.C2_STRUCTURE_GUIDANCE.CUE_TYPE,
+                            dict((key, float(value.item()))
+                                 for key, value in _stats.items()),
+                        ))
                     if (_exp_loop == 'C1' and dist_utils.is_main_process()
                             and global_step % max(1, int(det_cfg.C1_SOURCE_DIVERSIFICATION.LOG_INTERVAL)) == 0):
                         if _c1_stats.get('applied', False):
@@ -536,12 +551,14 @@ a3_controller=None):
             'SNORM_EXPERIMENT', 'E0'
         )
         _is_b1_ddp = (
-            _protected_ddp_exp in ('B1', 'B2', 'C1')
+            _protected_ddp_exp in ('B1', 'B2', 'C1', 'C2')
             and dist_utils.get_world_size() > 1
         )
         if _is_b1_ddp:
             _eval_env_name = (
-                'C1_DDP_EVAL_STEPS'
+                'C2_DDP_EVAL_STEPS'
+                if _protected_ddp_exp == 'C2'
+                else 'C1_DDP_EVAL_STEPS'
                 if _protected_ddp_exp == 'C1'
                 else 'B2_DDP_EVAL_STEPS'
                 if _protected_ddp_exp == 'B2'
@@ -628,7 +645,7 @@ def main(det_cfg, args):
                                       batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=det_cfg.DATALOADER.NUM_WORKERS, shuffle=False)
         target_loader = build_data_loaders(det_cfg.DATASETS.TARGETS, transforms=det_cfg.INPUT.TRANSFORMS_TRAIN, is_train=True, distributed=args.distributed,
                                        batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=0, shuffle=True)
-        if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1'):
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2'):
             _configured_batch = int(det_cfg.SOLVER.BATCH_SIZE)
             _loader_batch = int(train_loader.batch_sampler.batch_size)
             if _loader_batch != _configured_batch:
@@ -667,11 +684,11 @@ def main(det_cfg, args):
     # are constructed. The later optimizer setup repeats this idempotently.
     if (
             args.distributed
-            and os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1')):
+            and os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2')):
         _pre_ddp_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
         if _pre_ddp_exp == 'B2':
             configure_b2_trainable_parameters(model_det)
-        elif _pre_ddp_exp == 'C1':
+        elif _pre_ddp_exp in ('C1', 'C2'):
             _pre_ddp_teacher = model_det.teacher
             for p in _pre_ddp_teacher.backbone_0.parameters(): p.requires_grad_(False)
             for p in _pre_ddp_teacher.backbone_1.parameters(): p.requires_grad_(False)
@@ -681,7 +698,9 @@ def main(det_cfg, args):
             for p in _pre_ddp_teacher.rpn_norm.parameters(): p.requires_grad_(True)
             for p in _pre_ddp_teacher.box_head_norm.parameters(): p.requires_grad_(True)
             for p in model_det.dis.parameters(): p.requires_grad_(False)
-            print('[C1 PRE-DDP] applied E2 detector requires_grad policy')
+            print('[{} PRE-DDP] applied E2 detector requires_grad policy'.format(
+                _pre_ddp_exp
+            ))
         else:
             configure_b1_trainable_parameters(model_det)
     
@@ -717,7 +736,7 @@ def main(det_cfg, args):
         '/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/'
         's0_dbias_color_E2_zdh_parallel/E2/best.pth'
     )
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1'):
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2'):
         _protected_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
         if os.path.abspath(_load_path or '') != _fixed_e2_checkpoint:
             raise RuntimeError(
@@ -754,13 +773,27 @@ def main(det_cfg, args):
                 raise RuntimeError(
                     'C1_SOURCE_DIVERSIFICATION.ENABLED must be True'
                 )
+        if _protected_exp == 'C2':
+            if _anchor_sizes != (64, 128, 256, 512):
+                raise RuntimeError(
+                    'C2 must use original 12-anchor configuration '
+                    '(64, 128, 256, 512), got %s' % (str(_anchor_sizes),)
+                )
+            if not bool(det_cfg.C2_STRUCTURE_GUIDANCE.ENABLED):
+                raise RuntimeError('C2_STRUCTURE_GUIDANCE.ENABLED must be True')
+            if bool(det_cfg.C1_SOURCE_DIVERSIFICATION.ENABLED):
+                raise RuntimeError('C2 must not enable C1 source diversification')
+            if bool(det_cfg.SELECTIVE_AHDR.ENABLED):
+                raise RuntimeError('C2 must not enable B1/B2 Selective-AHDR')
         if (
                 _protected_exp == 'B2'
                 and not bool(det_cfg.B2_OBJECT_AWARE.ENABLED)):
             raise RuntimeError('B2_OBJECT_AWARE.ENABLED must be True')
     print('[EXPERIMENT START]')
     print('experiment =', (
-        'C1_SOURCE_ADAPTIVE_DIVERSIFICATION'
+        'C2_STRUCTURE_GUIDED_AHDR'
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C2'
+        else 'C1_SOURCE_ADAPTIVE_DIVERSIFICATION'
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C1'
         else 'B2_OBJECT_AWARE_SELECTIVE_AHDR'
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B2'
@@ -805,7 +838,7 @@ def main(det_cfg, args):
     work_dir = det_cfg.WORK_DIR
     _exp_wd = os.environ.get('SNORM_EXPERIMENT', 'E0')
     if _exp_wd != 'E0':
-        _work_suffix = 'E2' if _exp_wd in ('A3', 'A4', 'B1', 'B2', 'C1') else _exp_wd
+        _work_suffix = 'E2' if _exp_wd in ('A3', 'A4', 'B1', 'B2', 'C1', 'C2') else _exp_wd
         work_dir = os.path.join(work_dir, _work_suffix)
         os.makedirs(work_dir, exist_ok=True)
         print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
@@ -874,8 +907,8 @@ def main(det_cfg, args):
                       model_without_ddp,
                       extra_trainable_names=_gate_names,
                   )
-              elif _exp == 'C1':
-                  print('  [C1] 12-anchor source diversification; detector training policy = E2')
+              elif _exp in ('C1', 'C2'):
+                  print('  [{}] 12-anchor detector training policy = E2'.format(_exp))
                   for p in _teacher.backbone_0.parameters(): p.requires_grad_(False)
                   for p in _teacher.backbone_1.parameters(): p.requires_grad_(False)
                   for p in _teacher.backbone_2.parameters(): p.requires_grad_(False)
@@ -889,26 +922,26 @@ def main(det_cfg, args):
                   _rp = _count(_teacher.rpn_norm.parameters())
                   _bp = _count(_teacher.box_head_norm.parameters())
 
-                  print('  [C1] backbone_3 params:', _b3p,
+                  print('  [{}] backbone_3 params:'.format(_exp), _b3p,
                         'rpn_norm params:', _rp,
                         'box_head_norm params:', _bp)
-                  print('  [C1] backbone_3 lr:', _base_lr * 0.1,
+                  print('  [{}] backbone_3 lr:'.format(_exp), _base_lr * 0.1,
                         'detector head lr:', _base_lr)
 
                   model_paramters += [{
                       'params': _teacher.backbone_3.parameters(),
                       'lr': _base_lr * 0.1,
-                      'name': 'c1_backbone_3',
+                      'name': _exp.lower() + '_backbone_3',
                   }]
                   model_paramters += [{
                       'params': _teacher.rpn_norm.parameters(),
                       'lr': _base_lr,
-                      'name': 'c1_rpn_norm',
+                      'name': _exp.lower() + '_rpn_norm',
                   }]
                   model_paramters += [{
                       'params': _teacher.box_head_norm.parameters(),
                       'lr': _base_lr,
-                      'name': 'c1_box_head_norm',
+                      'name': _exp.lower() + '_box_head_norm',
                   }]
 
                   a3_controller = None

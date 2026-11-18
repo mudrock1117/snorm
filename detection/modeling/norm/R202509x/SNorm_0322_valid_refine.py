@@ -99,6 +99,65 @@ class SNorm(nn.Module):
         # directory is created and the original tensor path is preserved.
         self._diag_enabled = os.environ.get('SNORM_DIAG', '0') == '1'
         self._diag_call_index = 0
+        self._c2_enabled = False
+        self._c2_cue_type = 'high_frequency_residual'
+        self._c2_strength = 0.20
+        self._c2_cue_scale = 2.0
+        self._c2_blur_kernel = 3
+        self._c2_last_stats = None
+
+    def configure_structure_guidance(self, enabled=False,
+                                     cue_type='high_frequency_residual',
+                                     strength=0.20, cue_scale=2.0,
+                                     blur_kernel=3):
+        """Configure the parameter-free C2 final-step structure correction."""
+        if cue_type != 'high_frequency_residual':
+            raise ValueError('unsupported C2 structure cue: %s' % cue_type)
+        blur_kernel = int(blur_kernel)
+        if blur_kernel < 3 or blur_kernel % 2 == 0:
+            raise ValueError('C2 BLUR_KERNEL must be an odd integer >= 3')
+        if float(strength) < 0.0 or float(strength) > 1.0:
+            raise ValueError('C2 STRENGTH must be in [0, 1]')
+        if float(cue_scale) <= 0.0:
+            raise ValueError('C2 CUE_SCALE must be positive')
+        self._c2_enabled = bool(enabled)
+        self._c2_cue_type = cue_type
+        self._c2_strength = float(strength)
+        self._c2_cue_scale = float(cue_scale)
+        self._c2_blur_kernel = blur_kernel
+
+    def _apply_structure_guidance(self, base, legacy):
+        """Restore missing base high frequencies only at structured pixels.
+
+        C2 leaves the low-frequency AHDR result intact.  The bounded cue is
+        derived from the normalized high-frequency magnitude of the original
+        SNorm base, then interpolates legacy high frequencies toward the base.
+        """
+        if not self._c2_enabled:
+            return legacy
+        padding = self._c2_blur_kernel // 2
+        base_low = F.avg_pool2d(
+            base, self._c2_blur_kernel, stride=1, padding=padding
+        )
+        legacy_low = F.avg_pool2d(
+            legacy, self._c2_blur_kernel, stride=1, padding=padding
+        )
+        base_high = base - base_low
+        legacy_high = legacy - legacy_low
+        magnitude = base_high.abs().mean(dim=1, keepdim=True)
+        normalizer = magnitude.mean(dim=(2, 3), keepdim=True).clamp_min(1e-6)
+        cue = (magnitude / (self._c2_cue_scale * normalizer)).clamp(0.0, 1.0)
+        correction = self._c2_strength * cue * (base_high - legacy_high)
+        output = legacy + correction
+        self._c2_last_stats = {
+            'cue_mean': cue.detach().mean(),
+            'cue_max': cue.detach().max(),
+            'base_high_abs_mean': base_high.detach().abs().mean(),
+            'legacy_high_abs_mean': legacy_high.detach().abs().mean(),
+            'correction_abs_mean': correction.detach().abs().mean(),
+            'correction_abs_max': correction.detach().abs().max(),
+        }
+        return output
 
     def _new_diagnostic_recorder(self):
         if not self._diag_enabled:
@@ -722,6 +781,7 @@ class SNorm(nn.Module):
                     _previous = output if _diag is not None else None
                     _raw_render = self._legacy_render_tensor(_s6_ref, output, feats_mem[3])
                     output = _raw_render * _res_w + save_im0 * (1 - _res_w)
+                    output = self._apply_structure_guidance(save_im0, output)
                     if _diag is not None:
                         _diag.record_ahdr_step(
                             6, _s6_ref, feats_mem[3], _previous, _raw_render, output, _diag_target_masks

@@ -105,6 +105,24 @@ class ModuleSet(nn.Module):
             #    #nn.ReLU()
             #)
             self.proj_norm = SNorm()
+            self.structure_guided_ahdr_enabled = bool(
+                cfg.C2_STRUCTURE_GUIDANCE.ENABLED
+            )
+            self.proj_norm.configure_structure_guidance(
+                enabled=self.structure_guided_ahdr_enabled,
+                cue_type=cfg.C2_STRUCTURE_GUIDANCE.CUE_TYPE,
+                strength=cfg.C2_STRUCTURE_GUIDANCE.STRENGTH,
+                cue_scale=cfg.C2_STRUCTURE_GUIDANCE.CUE_SCALE,
+                blur_kernel=cfg.C2_STRUCTURE_GUIDANCE.BLUR_KERNEL,
+            )
+            if self.structure_guided_ahdr_enabled:
+                print(
+                    '[C2 STRUCTURE-GUIDED AHDR] enabled=True '
+                    'cue={} strength={} parameters=0'.format(
+                        cfg.C2_STRUCTURE_GUIDANCE.CUE_TYPE,
+                        cfg.C2_STRUCTURE_GUIDANCE.STRENGTH,
+                    )
+                )
             self.selective_ahdr_enabled = bool(cfg.SELECTIVE_AHDR.ENABLED)
             if self.selective_ahdr_enabled:
                 self.selective_ahdr_gate = SelectiveAHDRGate(
@@ -555,7 +573,9 @@ class ModuleSet(nn.Module):
                 moe_mark=moe_mark,
                 targets=targets,
                 force_eval_render=(
-                    self.selective_ahdr_enabled and self.training
+                    (self.selective_ahdr_enabled
+                     or self.structure_guided_ahdr_enabled)
+                    and self.training
                 ),
             )
             if self.selective_ahdr_enabled:

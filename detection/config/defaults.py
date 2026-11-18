@@ -185,6 +185,17 @@ _C.SELECTIVE_AHDR.GATE_REG_WEIGHT = 0.001
 _C.SELECTIVE_AHDR.LOG_INTERVAL = 50
 
 # ---------------------------------------------------------------------------- #
+# C2 parameter-free structure-guided AHDR (disabled by default)
+# ---------------------------------------------------------------------------- #
+_C.C2_STRUCTURE_GUIDANCE = CN()
+_C.C2_STRUCTURE_GUIDANCE.ENABLED = False
+_C.C2_STRUCTURE_GUIDANCE.CUE_TYPE = "high_frequency_residual"
+_C.C2_STRUCTURE_GUIDANCE.STRENGTH = 0.20
+_C.C2_STRUCTURE_GUIDANCE.CUE_SCALE = 2.0
+_C.C2_STRUCTURE_GUIDANCE.BLUR_KERNEL = 3
+_C.C2_STRUCTURE_GUIDANCE.LOG_INTERVAL = 50
+
+# ---------------------------------------------------------------------------- #
 # B2 source-only object-aware Gate supervision (disabled by default)
 # ---------------------------------------------------------------------------- #
 _C.B2_OBJECT_AWARE = CN()
