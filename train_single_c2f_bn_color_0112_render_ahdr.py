@@ -146,7 +146,7 @@ def convert_sync_batchnorm(model):
 
 
 def set_d1_frozen_detector_bn_eval(model):
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') != 'D1':
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') not in ('D1', 'D2'):
         return 0
     model_inner = model.module if hasattr(model, 'module') else model
     teacher = model_inner.teacher
@@ -602,7 +602,7 @@ a3_controller=None):
                     del total_loss, selected_detection_loss
                     del loss_dict_det, outputs_det
                     torch.cuda.empty_cache()
-                elif _exp_loop == 'D1':
+                elif _exp_loop in ('D1', 'D2'):
                     # Preserve the legacy AHDR reconstruction/attention losses
                     # exactly, then add a separate frozen-detector guidance
                     # forward.  mode_training=1 reaches ModuleSet mode=5,
@@ -657,7 +657,8 @@ a3_controller=None):
                     )
                     d1_det_loss = d1_rpn_loss + d1_roi_loss
                     _d1_det_weight = float(os.environ.get(
-                        'SNORM_D1_DET_WEIGHT', '0.01'
+                        'SNORM_D2_DET_WEIGHT' if _exp_loop == 'D2' else 'SNORM_D1_DET_WEIGHT',
+                        '0.005' if _exp_loop == 'D2' else '0.01'
                     ))
                     if _d1_det_weight <= 0.0:
                         raise RuntimeError(
@@ -691,6 +692,10 @@ a3_controller=None):
                     # detection guidance without invoking autograd.grad(),
                     # which would bypass DDP's normal reducer contract.
                     weighted_d1_det_loss.backward()
+
+                    d2_anchor_loss = None
+                    weighted_d2_anchor_loss = None
+
                     if _d1_should_check_grad:
                         _d1_grad_sq = 0.0
                         _d1_grad_present = False
@@ -715,19 +720,41 @@ a3_controller=None):
                                 'render_net gradient'
                             )
                         d1_detection_gradient_checked = True
+
+                    # D2 keeps the E2 initialization as a parameter-space trust
+                    # region without an additional six-step teacher forward.
+                    # Apply this only after measuring the detection-only gradient.
+                    if _exp_loop == 'D2':
+                        _d2_anchor_weight = float(os.environ.get(
+                            'SNORM_D2_ANCHOR_WEIGHT', '10.0'
+                        ))
+                        if _d2_anchor_weight <= 0.0:
+                            raise RuntimeError('[D2] anchor weight must be positive')
+                        _d2_terms = []
+                        for _d2_p in _d1_render_parameters:
+                            if not hasattr(_d2_p, '_d2_e2_anchor'):
+                                raise RuntimeError('[D2] missing E2 render_net anchor')
+                            _d2_terms.append(
+                                (_d2_p - _d2_p._d2_e2_anchor).pow(2).mean()
+                            )
+                        d2_anchor_loss = sum(_d2_terms) / max(1, len(_d2_terms))
+                        weighted_d2_anchor_loss = _d2_anchor_weight * d2_anchor_loss
+                        weighted_d2_anchor_loss.backward()
+
                     raw_ahdr_loss = det_loss_s3 + det_loss_s5
                     total_d1_loss = raw_ahdr_loss + weighted_d1_det_loss
+                    if weighted_d2_anchor_loss is not None:
+                        total_d1_loss = total_d1_loss + weighted_d2_anchor_loss
                     metric_logger.update(det_loss_s=total_d1_loss)
                     metric_logger.update(det_loss_s3=det_loss_s3)
                     if (dist_utils.is_main_process()
                             and _d1_should_check_grad):
                         print(
-                            '[D1] step={} raw_ahdr_loss={:.6f} '
+                            '[{}] step={} raw_ahdr_loss={:.6f} '.format(_exp_loop, global_step) +
                             'raw_rpn_loss={:.6f} raw_roi_loss={:.6f} '
                             'raw_det_loss={:.6f} det_weight={:.6f} '
                             'weighted_det_loss={:.6f} '
                             'render_grad_norm={:.8f}'.format(
-                                global_step,
                                 float(raw_ahdr_loss.detach().item()),
                                 float(d1_rpn_loss.detach().item()),
                                 float(d1_roi_loss.detach().item()),
@@ -737,8 +764,15 @@ a3_controller=None):
                                 _d1_detection_grad_norm,
                             )
                         )
+                        if _exp_loop == 'D2':
+                            print('[D2] anchor_loss={:.10f} weighted_anchor={:.10f}'.format(
+                                float(d2_anchor_loss.detach().item()),
+                                float(weighted_d2_anchor_loss.detach().item()),
+                            ))
                     del raw_ahdr_loss, total_d1_loss
                     del weighted_d1_det_loss, d1_det_loss
+                    if d2_anchor_loss is not None:
+                        del d2_anchor_loss, weighted_d2_anchor_loss
                     del d1_rpn_loss, d1_roi_loss, loss_dict_d1
                     del det_loss_s3, det_loss_s5
                     del loss_dict_s3, loss_dict_s5
@@ -881,8 +915,13 @@ a3_controller=None):
             _protected_ddp_exp in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2')
             and dist_utils.get_world_size() > 1
         )
-        _is_d1 = _protected_ddp_exp == 'D1'
-        if _is_d1:
+        _is_d1 = _protected_ddp_exp in ('D1', 'D2')
+        if _protected_ddp_exp == 'D2':
+            _should_evaluate = (
+                global_step in (100, 200, 300, 500)
+                or (global_step > 500 and global_step % 500 == 0)
+            )
+        elif _is_d1:
             _should_evaluate = global_step % 500 == 0
         elif _is_b1_ddp:
             _eval_env_name = (
@@ -1034,7 +1073,7 @@ def main(det_cfg, args):
     # Apply it before DDP constructs reducer hooks; optimizer setup below
     # repeats and audits the same policy.
     if (args.distributed
-            and os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1'):
+            and os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2')):
         for _pre_d1_parameter in model_det.teacher.parameters():
             _pre_d1_parameter.requires_grad_(False)
         for _pre_d1_parameter in model_det.dis.parameters():
@@ -1099,12 +1138,9 @@ def main(det_cfg, args):
             broadcast_buffers=False,
         )
 
-        # D1 reuses the same render_net parameters in multiple reentrant
-        # activation-checkpoint backward passes. PyTorch 1.9 DDP requires
-        # static-graph mode for this fixed D1 training graph.
-        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2'):
             model_det._set_static_graph()
-            print('[D1] DDP static graph enabled for reentrant AHDR checkpointing')
+            print('[D1/D2] DDP static graph enabled for reentrant AHDR checkpointing')
        
         torch.autograd.set_detect_anomaly(True)
         torch.distributed.barrier()
@@ -1126,13 +1162,13 @@ def main(det_cfg, args):
         '/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/'
         's0_dbias_color_E2_zdh_parallel/E2/best.pth'
     )
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2'):
         if os.path.abspath(_load_path or '') != _fixed_e2_checkpoint:
             raise RuntimeError(
                 'D1 must initialize from read-only E2 checkpoint: %s'
                 % _fixed_e2_checkpoint
             )
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2', 'D1'):
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2', 'D1', 'D2'):
         _protected_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
         if os.path.abspath(_load_path or '') != _fixed_e2_checkpoint:
             raise RuntimeError(
@@ -1158,7 +1194,7 @@ def main(det_cfg, args):
             raise RuntimeError(
                 '%s Fog/Night evaluation protocol changed' % _protected_exp
             )
-        if _protected_exp == 'D1':
+        if _protected_exp in ('D1', 'D2'):
             if _anchor_sizes != (64, 128, 256, 512):
                 raise RuntimeError(
                     'D1 must use original 12-anchor configuration '
@@ -1321,13 +1357,21 @@ def main(det_cfg, args):
         work_dir = os.path.join(work_dir, _work_suffix)
         os.makedirs(work_dir, exist_ok=True)
         print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
-    if _exp_wd == 'D1':
+    if _exp_wd in ('D1', 'D2'):
         _d1_best_path = os.path.join(work_dir, 'best.txt')
-        best_mAP = 0.0
-        best_sum_mAP = 0.0
-        best_step = -1
-        current_foggy_mAP = 0.0
-        current_night_mAP = 0.0
+        if _exp_wd == 'D2':
+            # The E2 initialization is the true step-0 baseline.
+            current_foggy_mAP = 0.4123
+            current_night_mAP = 0.4196
+            best_sum_mAP = 0.8318
+            best_mAP = best_sum_mAP
+            best_step = 0
+        else:
+            best_mAP = 0.0
+            best_sum_mAP = 0.0
+            best_step = -1
+            current_foggy_mAP = 0.0
+            current_night_mAP = 0.0
         if os.path.exists(_d1_best_path):
             try:
                 with open(_d1_best_path, 'r') as _d1_best_file:
@@ -1367,7 +1411,10 @@ def main(det_cfg, args):
                 best_sum_mAP
             ))
         else:
-            print('[D1] no historical best found')
+            if _exp_wd == 'D2':
+                print('[D2] step-0 E2 baseline: Fog=0.4123 Night=0.4196 Sum=0.8318')
+            else:
+                print('[D1] no historical best found')
     if args.test_only:
         evaluation(model_det, test_loaders, device, types=det_cfg.TEST.EVAL_TYPES, output_dir=work_dir)
         return
@@ -1389,7 +1436,7 @@ def main(det_cfg, args):
               _rn = _proj.render_net
               _sp = getattr(_proj, 'sigma_weight_pred', None)
               def _count(_params): return sum(p.numel() for p in _params)
-              if _exp == 'D1':
+              if _exp in ('D1', 'D2'):
                   _d1_incompatible = []
                   if bool(det_cfg.C1_SOURCE_DIVERSIFICATION.ENABLED):
                       _d1_incompatible.append('C1_SOURCE_DIVERSIFICATION')
@@ -1468,10 +1515,15 @@ def main(det_cfg, args):
                       raise RuntimeError(
                           '[D1] SNORM_D1_DET_WEIGHT must be positive'
                       )
+                  _d1_lr = _base_lr
+                  if _exp == 'D2':
+                      _d1_lr = float(os.environ.get('SNORM_D2_LR', '5e-6'))
+                      for _parameter in _d1_render_parameters:
+                          _parameter._d2_e2_anchor = _parameter.detach().clone()
                   model_paramters += [{
                       'params': _d1_render_parameters,
-                      'lr': _base_lr,
-                      'name': 'd1_render_net',
+                      'lr': _d1_lr,
+                      'name': 'd2_render_net' if _exp == 'D2' else 'd1_render_net',
                   }]
                   print('  [D1] Frozen-Detector Task-Guided AHDR')
                   print('  [D1] render_net trainable params:',
@@ -1484,7 +1536,10 @@ def main(det_cfg, args):
                             parameter.requires_grad
                             for parameter in _sp.parameters()
                         )))
-                  print('  [D1] DET_WEIGHT:', _d1_det_weight)
+                  print('  [{}] DET_WEIGHT:'.format(_exp), _d1_det_weight)
+                  if _exp == 'D2':
+                      print('  [D2] LR:', _d1_lr)
+                      print('  [D2] ANCHOR_WEIGHT:', float(os.environ.get('SNORM_D2_ANCHOR_WEIGHT', '10.0')))
                   a3_controller = None
               elif _exp in ('B1', 'B2'):
                   if not _is_small_anchor_a:
