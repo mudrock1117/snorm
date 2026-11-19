@@ -4,6 +4,7 @@ import copy
 import random
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from detection.modeling.norm.selective_ahdr import extract_ahdr_render_tensor
 from torchvision import ops
 
@@ -202,7 +203,8 @@ class SNorm(nn.Module):
         self.alpha_ba.data.fill_(1.0)
         self.alpha_bu.data.zero_()
 
-    def forward(self, feats, use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=None, targets=None, force_eval_render=False):
+    def forward(self, feats, use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=None, targets=None, force_eval_render=False, d1_det_checkpoint=False):
+        self._d1_det_checkpoint_active = bool(d1_det_checkpoint)
         ################## segnet ####################
         if self.training and not force_eval_render:
             # global
@@ -846,6 +848,17 @@ class SNorm(nn.Module):
         while the model remains in training mode, so the contract is parsed
         explicitly without changing render_net mode or return values.
         """
+        if getattr(self, '_d1_det_checkpoint_active', False):
+            dummy = torch.zeros(1, device=x1.device, dtype=x1.dtype, requires_grad=True)
+
+            def _render_with_dummy(a, b, c, _dummy):
+                result = self.render_net(a, b, c)
+                tensor = extract_ahdr_render_tensor(result)
+                return tensor + _dummy.view(1, 1, 1, 1) * 0.0
+
+            result = checkpoint(_render_with_dummy, x0, x1, x2, dummy)
+            return result
+
         result = self.render_net(x0, x1, x2)
         return extract_ahdr_render_tensor(result)
 
