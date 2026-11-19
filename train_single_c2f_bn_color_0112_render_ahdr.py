@@ -997,7 +997,8 @@ def main(det_cfg, args):
                                        batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=0, shuffle=True)
         if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2'):
             _configured_batch = int(det_cfg.SOLVER.BATCH_SIZE)
-            _loader_batch = int(train_loader.batch_sampler.batch_size)            if _loader_batch != _configured_batch:
+            _loader_batch = int(train_loader.batch_sampler.batch_size)
+            if _loader_batch != _configured_batch:
                 raise RuntimeError(
                     '%s DataLoader batch mismatch: cfg=%s loader=%s'
                     % (os.environ.get('SNORM_EXPERIMENT', 'E0'), _configured_batch, _loader_batch)
