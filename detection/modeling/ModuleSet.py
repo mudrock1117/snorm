@@ -487,8 +487,12 @@ class ModuleSet(nn.Module):
             if update_norm_p:
                 self.proj_norm.update_norm_parameters(features_prev, is_update=is_update)
             
-            features_norm, feat_dict = self.dist_prog(features_prev.detach(), targets, stride=8, domain=domain, \
-            use_dbiase=use_dbiase, moe_mode=moe_mode)
+            features_norm, feat_dict = self.dist_prog(
+                features_prev.detach(), targets, stride=8, domain=domain,
+                use_dbiase=use_dbiase, moe_mode=moe_mode,
+                force_eval_render=(os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2')),
+                d1_det_checkpoint=(os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2')),
+            )
             #features_norm, feat_dict = features_prev, None
             #features_norm = features_prev
             #feat_dict = None
@@ -676,7 +680,7 @@ class ModuleSet(nn.Module):
             
         return outputs
     
-    def dist_prog(self, x, targets, stride=8, use_dbiase=False, domain='source', use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=0):
+    def dist_prog(self, x, targets, stride=8, use_dbiase=False, domain='source', use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=0, force_eval_render=False, d1_det_checkpoint=False):
         if self.cfg.MODEL.MODE.PJOTYPE == 'BN':
             _empty = {
                 'feature_dict': [],
@@ -697,12 +701,15 @@ class ModuleSet(nn.Module):
                 moe_mark=moe_mark,
                 targets=targets,
                 force_eval_render=(
-                    (self.selective_ahdr_enabled
-                     or self.structure_guided_ahdr_enabled
-                     or self.detection_benefit_enabled
-                     or self.detection_semantic_benefit_enabled)
-                    and self.training
+                    force_eval_render or (
+                        (self.selective_ahdr_enabled
+                         or self.structure_guided_ahdr_enabled
+                         or self.detection_benefit_enabled
+                         or self.detection_semantic_benefit_enabled)
+                        and self.training
+                    )
                 ),
+                d1_det_checkpoint=d1_det_checkpoint,
             )
             if self.detection_benefit_enabled:
                 required = ('selective_base', 'selective_legacy')
