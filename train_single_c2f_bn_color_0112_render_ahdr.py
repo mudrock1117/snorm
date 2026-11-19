@@ -74,6 +74,7 @@ is_update_memory = False
 current_foggy_mAP = 0.0
 current_night_mAP = 0.0
 best_sum_mAP = 0.0
+best_step = -1
 best_mAP = 0.0
 
 ###memory module
@@ -143,6 +144,43 @@ def convert_sync_batchnorm(model):
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     return model
 
+
+def set_d1_frozen_detector_bn_eval(model):
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') != 'D1':
+        return 0
+    model_inner = model.module if hasattr(model, 'module') else model
+    teacher = model_inner.teacher
+    frozen_detector_modules = (
+        teacher.backbone_0,
+        teacher.backbone_1,
+        teacher.backbone_2,
+        teacher.backbone_3,
+        teacher.rpn_norm,
+        teacher.box_head_norm,
+        teacher.rpn_eval,
+        teacher.box_head_eval,
+    )
+    batch_norm_types = (
+        nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d,
+        nn.SyncBatchNorm,
+    )
+    frozen_batch_norms = []
+    for detector_module in frozen_detector_modules:
+        for module in detector_module.modules():
+            if isinstance(module, batch_norm_types):
+                module.eval()
+                frozen_batch_norms.append(module)
+    training_batch_norms = [
+        module for module in frozen_batch_norms if module.training
+    ]
+    if training_batch_norms:
+        raise RuntimeError(
+            '[D1] frozen detector BatchNorm/SyncBatchNorm remained in train mode'
+        )
+    if not teacher.proj_norm.render_net.training:
+        raise RuntimeError('[D1] render_net must remain in train mode')
+    return len(frozen_batch_norms)
+
 def term_sig_hanlder(signum, frame):
     global global_end
     global_end = True
@@ -159,8 +197,10 @@ a3_controller=None):
     
     global global_step_gan
     global is_update_memory
+    d1_detection_gradient_checked = False
     
     model_det.train()
+    set_d1_frozen_detector_bn_eval(model_det)
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr_model', utils.SmoothedValue(window_size=1, fmt='{value:.0e}'))
@@ -562,6 +602,147 @@ a3_controller=None):
                     del total_loss, selected_detection_loss
                     del loss_dict_det, outputs_det
                     torch.cuda.empty_cache()
+                elif _exp_loop == 'D1':
+                    # Preserve the legacy AHDR reconstruction/attention losses
+                    # exactly, then add a separate frozen-detector guidance
+                    # forward.  mode_training=1 reaches ModuleSet mode=5,
+                    # whose features_prev.detach() protects the early backbone
+                    # while keeping the render_net -> detector autograd path.
+                    loss_dict_s3, _ = model_det(
+                        images, img_metas, s_targets, mode_training=10,
+                        outputs_teacher=None, moe_mark=0,
+                        stpd_images=tr_images, stpd_trans=tr_trans,
+                        step_iter=global_step,
+                    )
+                    det_loss_s3 = 100 * sum(list(loss_dict_s3.values()))
+                    det_loss_s3.backward()
+
+                    torch.nn.utils.clip_grad_norm_(
+                        model_det.parameters(), max_norm=1.0
+                    )
+
+                    loss_dict_s5, _ = model_det(
+                        images, img_metas, s_targets, mode_training=11,
+                        outputs_teacher=None, moe_mark=2,
+                        stpd_images=tr_images, stpd_trans=tr_trans,
+                        step_iter=global_step,
+                    )
+                    det_loss_s5 = 100 * sum(list(loss_dict_s5.values()))
+                    det_loss_s5.backward()
+
+                    loss_dict_d1, _ = model_det(
+                        tr_images, img_metas, s_targets, mode_training=1,
+                        step_iter=global_step, is_update=False,
+                    )
+                    _d1_required_losses = (
+                        'rpn_cls_loss_w', 'rpn_reg_loss_w',
+                        'rcnn_cls_loss_w', 'rcnn_reg_loss_w',
+                    )
+                    _d1_missing_losses = [
+                        key for key in _d1_required_losses
+                        if key not in loss_dict_d1
+                    ]
+                    if _d1_missing_losses:
+                        raise RuntimeError(
+                            '[D1] detection losses missing: %s'
+                            % _d1_missing_losses
+                        )
+                    d1_rpn_loss = (
+                        loss_dict_d1['rpn_cls_loss_w']
+                        + loss_dict_d1['rpn_reg_loss_w']
+                    )
+                    d1_roi_loss = (
+                        loss_dict_d1['rcnn_cls_loss_w']
+                        + loss_dict_d1['rcnn_reg_loss_w']
+                    )
+                    d1_det_loss = d1_rpn_loss + d1_roi_loss
+                    _d1_det_weight = float(os.environ.get(
+                        'SNORM_D1_DET_WEIGHT', '0.01'
+                    ))
+                    if _d1_det_weight <= 0.0:
+                        raise RuntimeError(
+                            '[D1] SNORM_D1_DET_WEIGHT must be positive'
+                        )
+                    weighted_d1_det_loss = _d1_det_weight * d1_det_loss
+
+                    _d1_should_check_grad = (
+                        not d1_detection_gradient_checked
+                        or global_step % max(1, print_freq) == 0
+                    )
+                    _d1_detection_grad_norm = None
+                    if _d1_should_check_grad:
+                        _d1_inner = (
+                            model_det.module
+                            if hasattr(model_det, 'module') else model_det
+                        )
+                        _d1_render_parameters = [
+                            parameter for parameter in
+                            _d1_inner.teacher.proj_norm.render_net.parameters()
+                            if parameter.requires_grad
+                        ]
+                        _d1_grads_before = [
+                            (parameter.grad.detach().clone()
+                             if parameter.grad is not None else None)
+                            for parameter in _d1_render_parameters
+                        ]
+
+                    # This is the real DDP-compatible backward.  The optional
+                    # snapshots above measure only the gradient increment from
+                    # detection guidance without invoking autograd.grad(),
+                    # which would bypass DDP's normal reducer contract.
+                    weighted_d1_det_loss.backward()
+                    if _d1_should_check_grad:
+                        _d1_grad_sq = 0.0
+                        _d1_grad_present = False
+                        for _d1_parameter, _d1_before in zip(
+                                _d1_render_parameters, _d1_grads_before):
+                            _d1_after = _d1_parameter.grad
+                            if _d1_after is not None:
+                                _d1_increment = _d1_after.detach()
+                                if _d1_before is not None:
+                                    _d1_increment = (
+                                        _d1_increment - _d1_before
+                                    )
+                                _d1_grad_present = True
+                                _d1_grad_sq += float(
+                                    _d1_increment.pow(2).sum().item()
+                                )
+                        _d1_detection_grad_norm = math.sqrt(_d1_grad_sq)
+                        if (not _d1_grad_present
+                                or _d1_detection_grad_norm <= 0.0):
+                            raise RuntimeError(
+                                '[D1] detection guidance produced no '
+                                'render_net gradient'
+                            )
+                        d1_detection_gradient_checked = True
+                    raw_ahdr_loss = det_loss_s3 + det_loss_s5
+                    total_d1_loss = raw_ahdr_loss + weighted_d1_det_loss
+                    metric_logger.update(det_loss_s=total_d1_loss)
+                    metric_logger.update(det_loss_s3=det_loss_s3)
+                    if (dist_utils.is_main_process()
+                            and _d1_should_check_grad):
+                        print(
+                            '[D1] step={} raw_ahdr_loss={:.6f} '
+                            'raw_rpn_loss={:.6f} raw_roi_loss={:.6f} '
+                            'raw_det_loss={:.6f} det_weight={:.6f} '
+                            'weighted_det_loss={:.6f} '
+                            'render_grad_norm={:.8f}'.format(
+                                global_step,
+                                float(raw_ahdr_loss.detach().item()),
+                                float(d1_rpn_loss.detach().item()),
+                                float(d1_roi_loss.detach().item()),
+                                float(d1_det_loss.detach().item()),
+                                _d1_det_weight,
+                                float(weighted_d1_det_loss.detach().item()),
+                                _d1_detection_grad_norm,
+                            )
+                        )
+                    del raw_ahdr_loss, total_d1_loss
+                    del weighted_d1_det_loss, d1_det_loss
+                    del d1_rpn_loss, d1_roi_loss, loss_dict_d1
+                    del det_loss_s3, det_loss_s5
+                    del loss_dict_s3, loss_dict_s5
+                    torch.cuda.empty_cache()
                 elif _exp_loop in ('E1', 'E2', 'A3', 'A4', 'C1', 'C2'):
                     _detector_images = images if _exp_loop == 'C1' else tr_images
                     loss_dict_det, _ = model_det(_detector_images, img_metas, s_targets, mode_training=0, step_iter=global_step, \
@@ -700,7 +881,10 @@ a3_controller=None):
             _protected_ddp_exp in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2')
             and dist_utils.get_world_size() > 1
         )
-        if _is_b1_ddp:
+        _is_d1 = _protected_ddp_exp == 'D1'
+        if _is_d1:
+            _should_evaluate = global_step % 500 == 0
+        elif _is_b1_ddp:
             _eval_env_name = (
                 'C3V2_DDP_EVAL_STEPS'
                 if _protected_ddp_exp == 'C3V2'
@@ -744,7 +928,16 @@ a3_controller=None):
                 torch.distributed.barrier()
             updated = test_func()
             if updated:
-                save_func('best.pth', 'sum_mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
+                if _is_d1:
+                    save_func(
+                        'best.pth',
+                        'best step: {}\nFog mAP: {:.4f}\nNight mAP: {:.4f}\nSum: {:.4f}\n'.format(
+                            best_step, current_foggy_mAP,
+                            current_night_mAP, best_sum_mAP,
+                        ),
+                    )
+                else:
+                    save_func('best.pth', 'sum_mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
             if dist_utils.is_main_process():
                 print(
                     '[{} EVAL] step={} fog={:.4f} night={:.4f} sum={:.4f}'.format(
@@ -792,6 +985,8 @@ a3_controller=None):
         print('[A3/A4/B1/B2] proj_norm frozen: skipped epoch state clipping/reset/compute_norm_parameters')
 
 def main(det_cfg, args):
+    global best_mAP, best_sum_mAP, best_step
+    global current_foggy_mAP, current_night_mAP
     print('----num_workers:', det_cfg.DATALOADER.NUM_WORKERS)
     
     # 只在非测试模式下加载训练数据
@@ -802,8 +997,7 @@ def main(det_cfg, args):
                                        batch_size=det_cfg.SOLVER.BATCH_SIZE, num_workers=0, shuffle=True)
         if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2'):
             _configured_batch = int(det_cfg.SOLVER.BATCH_SIZE)
-            _loader_batch = int(train_loader.batch_sampler.batch_size)
-            if _loader_batch != _configured_batch:
+            _loader_batch = int(train_loader.batch_sampler.batch_size)            if _loader_batch != _configured_batch:
                 raise RuntimeError(
                     '%s DataLoader batch mismatch: cfg=%s loader=%s'
                     % (os.environ.get('SNORM_EXPERIMENT', 'E0'), _configured_batch, _loader_batch)
@@ -834,6 +1028,30 @@ def main(det_cfg, args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model_det = build_detectors(det_cfg)
     model_det.to(device)
+
+    # D1 has a stricter whitelist than every detector-training experiment.
+    # Apply it before DDP constructs reducer hooks; optimizer setup below
+    # repeats and audits the same policy.
+    if (args.distributed
+            and os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1'):
+        for _pre_d1_parameter in model_det.teacher.parameters():
+            _pre_d1_parameter.requires_grad_(False)
+        for _pre_d1_parameter in model_det.dis.parameters():
+            _pre_d1_parameter.requires_grad_(False)
+        for _pre_d1_parameter in (
+                model_det.teacher.proj_norm.render_net.parameters()):
+            _pre_d1_parameter.requires_grad_(True)
+        _pre_d1_unexpected = [
+            name for name, parameter in model_det.teacher.named_parameters()
+            if (parameter.requires_grad
+                and not name.startswith('proj_norm.render_net.'))
+        ]
+        if _pre_d1_unexpected:
+            raise RuntimeError(
+                '[D1 PRE-DDP] unexpected trainable parameters: %s'
+                % _pre_d1_unexpected
+            )
+        print('[D1 PRE-DDP] render_net-only requires_grad policy applied')
 
     # DDP must observe the final B1 requires_grad whitelist when reducer hooks
     # are constructed. The later optimizer setup repeats this idempotently.
@@ -900,7 +1118,13 @@ def main(det_cfg, args):
         '/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/'
         's0_dbias_color_E2_zdh_parallel/E2/best.pth'
     )
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2'):
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
+        if os.path.abspath(_load_path or '') != _fixed_e2_checkpoint:
+            raise RuntimeError(
+                'D1 must initialize from read-only E2 checkpoint: %s'
+                % _fixed_e2_checkpoint
+            )
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2', 'D1'):
         _protected_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
         if os.path.abspath(_load_path or '') != _fixed_e2_checkpoint:
             raise RuntimeError(
@@ -926,6 +1150,13 @@ def main(det_cfg, args):
             raise RuntimeError(
                 '%s Fog/Night evaluation protocol changed' % _protected_exp
             )
+        if _protected_exp == 'D1':
+            if _anchor_sizes != (64, 128, 256, 512):
+                raise RuntimeError(
+                    'D1 must use original 12-anchor configuration '
+                    '(64, 128, 256, 512), got %s'
+                    % (str(_anchor_sizes),)
+                )
         if _protected_exp == 'C1':
             if _anchor_sizes != (64, 128, 256, 512):
                 raise RuntimeError(
@@ -1082,6 +1313,53 @@ def main(det_cfg, args):
         work_dir = os.path.join(work_dir, _work_suffix)
         os.makedirs(work_dir, exist_ok=True)
         print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
+    if _exp_wd == 'D1':
+        _d1_best_path = os.path.join(work_dir, 'best.txt')
+        best_mAP = 0.0
+        best_sum_mAP = 0.0
+        best_step = -1
+        current_foggy_mAP = 0.0
+        current_night_mAP = 0.0
+        if os.path.exists(_d1_best_path):
+            try:
+                with open(_d1_best_path, 'r') as _d1_best_file:
+                    _d1_best_values = {}
+                    for _d1_line in _d1_best_file:
+                        _d1_line = _d1_line.strip()
+                        if not _d1_line:
+                            continue
+                        _d1_key, _d1_value = _d1_line.split(':', 1)
+                        _d1_best_values[_d1_key.strip()] = _d1_value.strip()
+                _d1_required_best_keys = (
+                    'best step', 'Fog mAP', 'Night mAP', 'Sum'
+                )
+                _d1_missing_best_keys = [
+                    key for key in _d1_required_best_keys
+                    if key not in _d1_best_values
+                ]
+                if _d1_missing_best_keys:
+                    raise ValueError(
+                        'missing keys: %s' % _d1_missing_best_keys
+                    )
+                best_step = int(_d1_best_values['best step'])
+                current_foggy_mAP = float(_d1_best_values['Fog mAP'])
+                current_night_mAP = float(_d1_best_values['Night mAP'])
+                best_sum_mAP = float(_d1_best_values['Sum'])
+                if not all(math.isfinite(value) for value in (
+                        current_foggy_mAP, current_night_mAP,
+                        best_sum_mAP)):
+                    raise ValueError('non-finite metric')
+                best_mAP = best_sum_mAP
+            except Exception as _d1_best_error:
+                raise RuntimeError(
+                    '[D1] failed to parse historical best file %s: %s'
+                    % (_d1_best_path, _d1_best_error)
+                )
+            print('[D1] historical best Sum: {:.4f}'.format(
+                best_sum_mAP
+            ))
+        else:
+            print('[D1] no historical best found')
     if args.test_only:
         evaluation(model_det, test_loaders, device, types=det_cfg.TEST.EVAL_TYPES, output_dir=work_dir)
         return
@@ -1103,7 +1381,104 @@ def main(det_cfg, args):
               _rn = _proj.render_net
               _sp = getattr(_proj, 'sigma_weight_pred', None)
               def _count(_params): return sum(p.numel() for p in _params)
-              if _exp in ('B1', 'B2'):
+              if _exp == 'D1':
+                  _d1_incompatible = []
+                  if bool(det_cfg.C1_SOURCE_DIVERSIFICATION.ENABLED):
+                      _d1_incompatible.append('C1_SOURCE_DIVERSIFICATION')
+                  if bool(det_cfg.SELECTIVE_AHDR.ENABLED):
+                      _d1_incompatible.append('SELECTIVE_AHDR')
+                  if bool(det_cfg.C2_STRUCTURE_GUIDANCE.ENABLED):
+                      _d1_incompatible.append('C2_STRUCTURE_GUIDANCE')
+                  if bool(det_cfg.C3_DETECTION_BENEFIT.ENABLED):
+                      _d1_incompatible.append('C3_DETECTION_BENEFIT')
+                  if bool(
+                          det_cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.ENABLED):
+                      _d1_incompatible.append(
+                          'C3V2_DETECTION_SEMANTIC_BENEFIT'
+                      )
+                  if bool(det_cfg.B2_OBJECT_AWARE.ENABLED):
+                      _d1_incompatible.append('B2_OBJECT_AWARE')
+                  if _d1_incompatible:
+                      raise RuntimeError(
+                          '[D1] incompatible mechanisms must be disabled: %s'
+                          % _d1_incompatible
+                      )
+
+                  for _parameter in _teacher.parameters():
+                      _parameter.requires_grad_(False)
+                  for _parameter in _dis.parameters():
+                      _parameter.requires_grad_(False)
+                  _d1_render_parameters = list(_rn.parameters())
+                  for _parameter in _d1_render_parameters:
+                      _parameter.requires_grad_(True)
+
+                  _d1_trainable_names = [
+                      name for name, parameter in
+                      _teacher.named_parameters()
+                      if parameter.requires_grad
+                  ]
+                  for _name in _d1_trainable_names:
+                      if not _name.startswith('proj_norm.render_net.'):
+                          raise RuntimeError(
+                              '[D1] unexpected trainable teacher parameter: '
+                              + _name
+                          )
+                  _d1_render_count = _count(
+                      parameter for parameter in _d1_render_parameters
+                      if parameter.requires_grad
+                  )
+                  if _d1_render_count == 0:
+                      raise RuntimeError(
+                          '[D1] render_net has no trainable parameters'
+                      )
+
+                  _d1_detector_modules = (
+                      ('backbone_0', _teacher.backbone_0),
+                      ('backbone_1', _teacher.backbone_1),
+                      ('backbone_2', _teacher.backbone_2),
+                      ('backbone_3', _teacher.backbone_3),
+                      ('rpn_norm', _teacher.rpn_norm),
+                      ('box_head_norm', _teacher.box_head_norm),
+                      ('rpn_eval', _teacher.rpn_eval),
+                      ('box_head_eval', _teacher.box_head_eval),
+                  )
+                  _d1_detector_count = sum(
+                      parameter.numel()
+                      for _, module in _d1_detector_modules
+                      for parameter in module.parameters()
+                      if parameter.requires_grad
+                  )
+                  if _d1_detector_count != 0:
+                      raise RuntimeError(
+                          '[D1] detector trainable parameter count must be 0; '
+                          'got %s' % _d1_detector_count
+                      )
+                  _d1_det_weight = float(os.environ.get(
+                      'SNORM_D1_DET_WEIGHT', '0.01'
+                  ))
+                  if _d1_det_weight <= 0.0:
+                      raise RuntimeError(
+                          '[D1] SNORM_D1_DET_WEIGHT must be positive'
+                      )
+                  model_paramters += [{
+                      'params': _d1_render_parameters,
+                      'lr': _base_lr,
+                      'name': 'd1_render_net',
+                  }]
+                  print('  [D1] Frozen-Detector Task-Guided AHDR')
+                  print('  [D1] render_net trainable params:',
+                        _d1_render_count)
+                  print('  [D1] detector trainable params:',
+                        _d1_detector_count)
+                  print('  [D1] optimizer params:', _d1_render_count)
+                  print('  [D1] sigma_weight_pred trainable:',
+                        bool(_sp is not None and any(
+                            parameter.requires_grad
+                            for parameter in _sp.parameters()
+                        )))
+                  print('  [D1] DET_WEIGHT:', _d1_det_weight)
+                  a3_controller = None
+              elif _exp in ('B1', 'B2'):
                   if not _is_small_anchor_a:
                       raise RuntimeError(
                           '%s requires protected anchor sizes' % _exp
@@ -1318,6 +1693,21 @@ def main(det_cfg, args):
                       sum(p.numel() for p in _group_params if p.requires_grad)
                   ))
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
+          if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
+              _d1_allowed_optimizer_ids = set(
+                  id(parameter)
+                  for parameter in
+                  model_without_ddp.teacher.proj_norm.render_net.parameters()
+              )
+              _d1_optimizer_ids = set(
+                  id(parameter)
+                  for group in optimizer_model.param_groups
+                  for parameter in group['params']
+              )
+              if _d1_optimizer_ids != _d1_allowed_optimizer_ids:
+                  raise RuntimeError(
+                      '[D1] optimizer parameters are not exactly render_net'
+                  )
           if a3_controller is not None:
               if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'B2':
                   audit_b2_trainable_parameters(
@@ -1405,7 +1795,8 @@ def main(det_cfg, args):
             target_loader.batch_sampler.sampler.set_epoch(epoch)
 
         def test_func():
-            global best_mAP, current_foggy_mAP, current_night_mAP, best_sum_mAP
+            global best_mAP, current_foggy_mAP, current_night_mAP
+            global best_sum_mAP, best_step
             updated = False
             model_det.eval()
             metrics = evaluation(model_det, test_loaders, device, det_cfg.TEST.EVAL_TYPES, output_dir=work_dir, iteration=global_step)
@@ -1418,18 +1809,34 @@ def main(det_cfg, args):
                                 current_foggy_mAP = v
                             elif 'night' in dataset_name.lower():
                                 current_night_mAP = v
-                if current_foggy_mAP > 0.4 and current_night_mAP > 0.4:
+                if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
                     current_sum = current_foggy_mAP + current_night_mAP
                     if current_sum > best_sum_mAP:
                         best_sum_mAP = current_sum
                         best_mAP = current_sum
+                        best_step = global_step
                         updated = True
-                        print('Both foggy ({:.4f}) and night ({:.4f}) mAP > 0.4, sum improved to {:.4f}'.format(
-                            current_foggy_mAP, current_night_mAP, current_sum))
+                        print(
+                            '[D1 BEST] step={} fog={:.4f} night={:.4f} '
+                            'sum={:.4f}'.format(
+                                best_step, current_foggy_mAP,
+                                current_night_mAP, current_sum,
+                            )
+                        )
                 else:
-                    print('Waiting for both foggy ({:.4f}) and night ({:.4f}) mAP to reach 0.4'.format(
-                        current_foggy_mAP, current_night_mAP))
+                    if current_foggy_mAP > 0.4 and current_night_mAP > 0.4:
+                        current_sum = current_foggy_mAP + current_night_mAP
+                        if current_sum > best_sum_mAP:
+                            best_sum_mAP = current_sum
+                            best_mAP = current_sum
+                            updated = True
+                            print('Both foggy ({:.4f}) and night ({:.4f}) mAP > 0.4, sum improved to {:.4f}'.format(
+                                current_foggy_mAP, current_night_mAP, current_sum))
+                    else:
+                        print('Waiting for both foggy ({:.4f}) and night ({:.4f}) mAP to reach 0.4'.format(
+                            current_foggy_mAP, current_night_mAP))
             model_det.train()
+            set_d1_frozen_detector_bn_eval(model_det)
             return updated
 
         def save_func(filename=None, save_str=None):
@@ -1454,14 +1861,16 @@ def main(det_cfg, args):
 
  
         #if epoch> 0 and epoch % 4 ==0:
-        if epoch > -1:
+        if (epoch > -1
+                and os.environ.get('SNORM_EXPERIMENT', 'E0') != 'D1'):
             updated = test_func()
             if updated:
                 save_func('best.pth', 'sum_mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
             print('Best sum mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
             
         #if epoch > 10:
-        if epoch > -1:
+        if (epoch > -1
+                and os.environ.get('SNORM_EXPERIMENT', 'E0') != 'D1'):
             if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C3V2':
                 save_func('model_epoch_latest.pth')
             else:
