@@ -437,9 +437,16 @@ class FasterRCNN(nn.Module):
 
 
                 ###e-net##
+                # D1 uses the E2 6-step restoration path for task-guided
+                # detection supervision. That path intentionally returns
+                # weight_dict=[None], and D1 does not use the legacy e-net
+                # auxiliary classification loss.
                 tc_wei_dict = output_teacher['feat_dict']['weight_dict']
+                if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
+                    tc_wei_dict = []
+
                 wei_len_num = len(tc_wei_dict)
-                tc_feat_dict = output_teacher['feat_dict']['feature_dict'][0:wei_len_num]  
+                tc_feat_dict = output_teacher['feat_dict']['feature_dict'][0:wei_len_num]
                 g_stride = 1 #tc_images.size(-2) / tc_wei_dict[0].size(-2)
                 
                 for idx_wi in range(wei_len_num):

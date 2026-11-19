@@ -1098,6 +1098,13 @@ def main(det_cfg, args):
             find_unused_parameters=True,
             broadcast_buffers=False,
         )
+
+        # D1 reuses the same render_net parameters in multiple reentrant
+        # activation-checkpoint backward passes. PyTorch 1.9 DDP requires
+        # static-graph mode for this fixed D1 training graph.
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
+            model_det._set_static_graph()
+            print('[D1] DDP static graph enabled for reentrant AHDR checkpointing')
        
         torch.autograd.set_detect_anomaly(True)
         torch.distributed.barrier()

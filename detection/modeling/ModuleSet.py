@@ -487,14 +487,46 @@ class ModuleSet(nn.Module):
             if update_norm_p:
                 self.proj_norm.update_norm_parameters(features_prev, is_update=is_update)
             
-            features_norm, feat_dict = self.dist_prog(features_prev.detach(), targets, stride=8, domain=domain, \
-            use_dbiase=use_dbiase, moe_mode=moe_mode)
+            features_norm, feat_dict = self.dist_prog(
+                features_prev.detach(),
+                targets,
+                stride=8,
+                domain=domain,
+                use_dbiase=use_dbiase,
+                moe_mode=moe_mode,
+                force_eval_render=(
+                    os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1'
+                ),
+                d1_det_checkpoint=(
+                    os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1'
+                ),
+            )
             #features_norm, feat_dict = features_prev, None
             #features_norm = features_prev
             #feat_dict = None
+            if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
+                print('[D1-GRAD] features_norm requires_grad=%s grad_fn=%s' %
+                      (features_norm.requires_grad, str(features_norm.grad_fn)))
+
             features_w = self.back_norm_w_snorm(features_norm)
+
+            if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
+                print('[D1-GRAD] features_w requires_grad=%s grad_fn=%s' %
+                      (features_w.requires_grad, str(features_w.grad_fn)))
             proposals_w, rpn_losses_w, _, _ = self.rpn_norm(images, features_w, img_metas, targets)
+
+            if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
+                print('[D1-GRAD] rpn_losses=%s' % {
+                    k: (v.requires_grad, str(v.grad_fn))
+                    for k, v in rpn_losses_w.items()
+                })
             dets_w, box_losses_w, _, _, _, _, _, obj_dets, _ = self.box_head_norm(features_w, proposals_w, img_metas, targets)
+
+            if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
+                print('[D1-GRAD] box_losses=%s' % {
+                    k: (v.requires_grad, str(v.grad_fn))
+                    for k, v in box_losses_w.items()
+                })
             dets_bb = None
 
             outputs['dets_wo'] = dets
@@ -557,8 +589,11 @@ class ModuleSet(nn.Module):
             #features_norm = features_prev
             #feat_dict = None
             features_w = self.back_norm_w_snorm(features_norm)
+
             proposals_w, rpn_losses_w, _, _ = self.rpn_norm(images, features_w, img_metas, targets)
+
             dets_w, box_losses_w, _, _, _, _, _, obj_dets, _ = self.box_head_norm(features_w, proposals_w, img_metas, targets)
+
             dets_bb = None
 
             outputs['dets_wo'] = dets
@@ -676,7 +711,7 @@ class ModuleSet(nn.Module):
             
         return outputs
     
-    def dist_prog(self, x, targets, stride=8, use_dbiase=False, domain='source', use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=0):
+    def dist_prog(self, x, targets, stride=8, use_dbiase=False, domain='source', use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=0, force_eval_render=False, d1_det_checkpoint=False):
         if self.cfg.MODEL.MODE.PJOTYPE == 'BN':
             _empty = {
                 'feature_dict': [],
@@ -697,12 +732,16 @@ class ModuleSet(nn.Module):
                 moe_mark=moe_mark,
                 targets=targets,
                 force_eval_render=(
-                    (self.selective_ahdr_enabled
-                     or self.structure_guided_ahdr_enabled
-                     or self.detection_benefit_enabled
-                     or self.detection_semantic_benefit_enabled)
-                    and self.training
+                    force_eval_render
+                    or (
+                        (self.selective_ahdr_enabled
+                         or self.structure_guided_ahdr_enabled
+                         or self.detection_benefit_enabled
+                         or self.detection_semantic_benefit_enabled)
+                        and self.training
+                    )
                 ),
+                d1_det_checkpoint=d1_det_checkpoint,
             )
             if self.detection_benefit_enabled:
                 required = ('selective_base', 'selective_legacy')
