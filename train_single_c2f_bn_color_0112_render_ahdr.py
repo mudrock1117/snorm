@@ -693,26 +693,8 @@ a3_controller=None):
                     # which would bypass DDP's normal reducer contract.
                     weighted_d1_det_loss.backward()
 
-                    # D2 keeps the E2 initialization as a parameter-space trust
-                    # region without an additional six-step teacher forward.
                     d2_anchor_loss = None
                     weighted_d2_anchor_loss = None
-                    if _exp_loop == 'D2':
-                        _d2_anchor_weight = float(os.environ.get(
-                            'SNORM_D2_ANCHOR_WEIGHT', '10.0'
-                        ))
-                        if _d2_anchor_weight <= 0.0:
-                            raise RuntimeError('[D2] anchor weight must be positive')
-                        _d2_terms = []
-                        for _d2_p in _d1_render_parameters:
-                            if not hasattr(_d2_p, '_d2_e2_anchor'):
-                                raise RuntimeError('[D2] missing E2 render_net anchor')
-                            _d2_terms.append(
-                                (_d2_p - _d2_p._d2_e2_anchor).pow(2).mean()
-                            )
-                        d2_anchor_loss = sum(_d2_terms) / max(1, len(_d2_terms))
-                        weighted_d2_anchor_loss = _d2_anchor_weight * d2_anchor_loss
-                        weighted_d2_anchor_loss.backward()
 
                     if _d1_should_check_grad:
                         _d1_grad_sq = 0.0
@@ -738,6 +720,27 @@ a3_controller=None):
                                 'render_net gradient'
                             )
                         d1_detection_gradient_checked = True
+
+                    # D2 keeps the E2 initialization as a parameter-space trust
+                    # region without an additional six-step teacher forward.
+                    # Apply this only after measuring the detection-only gradient.
+                    if _exp_loop == 'D2':
+                        _d2_anchor_weight = float(os.environ.get(
+                            'SNORM_D2_ANCHOR_WEIGHT', '10.0'
+                        ))
+                        if _d2_anchor_weight <= 0.0:
+                            raise RuntimeError('[D2] anchor weight must be positive')
+                        _d2_terms = []
+                        for _d2_p in _d1_render_parameters:
+                            if not hasattr(_d2_p, '_d2_e2_anchor'):
+                                raise RuntimeError('[D2] missing E2 render_net anchor')
+                            _d2_terms.append(
+                                (_d2_p - _d2_p._d2_e2_anchor).pow(2).mean()
+                            )
+                        d2_anchor_loss = sum(_d2_terms) / max(1, len(_d2_terms))
+                        weighted_d2_anchor_loss = _d2_anchor_weight * d2_anchor_loss
+                        weighted_d2_anchor_loss.backward()
+
                     raw_ahdr_loss = det_loss_s3 + det_loss_s5
                     total_d1_loss = raw_ahdr_loss + weighted_d1_det_loss
                     if weighted_d2_anchor_loss is not None:
