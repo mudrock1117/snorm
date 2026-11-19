@@ -438,6 +438,10 @@ class FasterRCNN(nn.Module):
 
                 ###e-net##
                 tc_wei_dict = output_teacher['feat_dict']['weight_dict']
+                # D1/D2 use the E2 six-step restoration path, which intentionally
+                # returns weight_dict=[None]. They do not use the legacy e-net loss.
+                if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2'):
+                    tc_wei_dict = []
                 wei_len_num = len(tc_wei_dict)
                 tc_feat_dict = output_teacher['feat_dict']['feature_dict'][0:wei_len_num]  
                 g_stride = 1 #tc_images.size(-2) / tc_wei_dict[0].size(-2)
