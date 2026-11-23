@@ -85,6 +85,21 @@ class SNorm(nn.Module):
 
         self.render_net = AHDR(3, 64)
 
+        # D4: E2-preserving final residual adapter.
+        # It is applied only after the complete legacy multi-step AHDR path.
+        # The final convolution is zero-initialized, therefore D4 at step 0
+        # is exactly identical to the loaded E2 function.
+        self.d4_adapter = nn.Sequential(
+            nn.Conv2d(3, 8, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(8, 3, kernel_size=1, stride=1, padding=0, bias=True),
+        )
+        nn.init.zeros_(self.d4_adapter[-1].weight)
+        nn.init.zeros_(self.d4_adapter[-1].bias)
+        self._d4_enabled = os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D4'
+        self._d4_alpha = float(os.environ.get('SNORM_D4_ALPHA', '0.05'))
+        self._d4_last_stats = None
+
         # NOTE: 不再使用可学习的 gamma_conv，夜景增强改为纯算法式（基于亮度/照度自适应）
 
         ###########################################
@@ -827,6 +842,18 @@ class SNorm(nn.Module):
 
                 if _diag is not None:
                     _diag.flush()
+
+            # D4 is deliberately outside the recurrent AHDR loop:
+            # E2's complete six-step render path stays frozen and unchanged.
+            if self._d4_enabled:
+                _d4_residual_raw = self.d4_adapter(output)
+                _d4_correction = self._d4_alpha * torch.tanh(_d4_residual_raw)
+                output = output + _d4_correction
+                self._d4_last_stats = {
+                    'raw_abs_mean': _d4_residual_raw.detach().abs().mean(),
+                    'correction_abs_mean': _d4_correction.detach().abs().mean(),
+                    'correction_abs_max': _d4_correction.detach().abs().max(),
+                }
 
             output = self.norm_forward(output)
             output_dict = {'feature_dict': feats_mem, 'weight_dict': [None]}

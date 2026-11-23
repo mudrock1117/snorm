@@ -490,8 +490,12 @@ class ModuleSet(nn.Module):
             features_norm, feat_dict = self.dist_prog(
                 features_prev.detach(), targets, stride=8, domain=domain,
                 use_dbiase=use_dbiase, moe_mode=moe_mode,
-                force_eval_render=(os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2')),
-                d1_det_checkpoint=(os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2')),
+                # D4 also needs the deterministic/eval-style legacy E2
+                # render path for frozen-detector task guidance.  Unlike
+                # D1/D2/D3, D4 does not backpropagate through render_net,
+                # so reentrant AHDR checkpointing remains disabled for D4.
+                force_eval_render=(os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2', 'D3', 'D4')),
+                d1_det_checkpoint=(os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2', 'D3')),
             )
             #features_norm, feat_dict = features_prev, None
             #features_norm = features_prev

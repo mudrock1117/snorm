@@ -146,7 +146,7 @@ def convert_sync_batchnorm(model):
 
 
 def set_d1_frozen_detector_bn_eval(model):
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') not in ('D1', 'D2'):
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') not in ('D1', 'D2', 'D3'):
         return 0
     model_inner = model.module if hasattr(model, 'module') else model
     teacher = model_inner.teacher
@@ -602,7 +602,104 @@ a3_controller=None):
                     del total_loss, selected_detection_loss
                     del loss_dict_det, outputs_det
                     torch.cuda.empty_cache()
-                elif _exp_loop in ('D1', 'D2'):
+                elif _exp_loop == 'D4':
+                    # D4 intentionally does NOT optimize the legacy AHDR
+                    # reconstruction/attention objectives. The complete E2
+                    # render path is frozen; only the zero-init final adapter
+                    # receives task gradients from the frozen detector.
+                    loss_dict_d4, _ = model_det(
+                        tr_images, img_metas, s_targets,
+                        mode_training=1,
+                        step_iter=global_step,
+                        is_update=False,
+                    )
+
+                    _d4_required_losses = (
+                        'rpn_cls_loss_w', 'rpn_reg_loss_w',
+                        'rcnn_cls_loss_w', 'rcnn_reg_loss_w',
+                    )
+                    _d4_missing_losses = [
+                        key for key in _d4_required_losses
+                        if key not in loss_dict_d4
+                    ]
+                    if _d4_missing_losses:
+                        raise RuntimeError(
+                            '[D4] detection losses missing: %s'
+                            % _d4_missing_losses
+                        )
+
+                    d4_rpn_loss = (
+                        loss_dict_d4['rpn_cls_loss_w']
+                        + loss_dict_d4['rpn_reg_loss_w']
+                    )
+                    d4_roi_loss = (
+                        loss_dict_d4['rcnn_cls_loss_w']
+                        + loss_dict_d4['rcnn_reg_loss_w']
+                    )
+                    d4_det_loss = d4_rpn_loss + d4_roi_loss
+                    d4_det_loss.backward()
+
+                    _d4_inner = (
+                        model_det.module
+                        if hasattr(model_det, 'module') else model_det
+                    )
+                    _d4_proj = _d4_inner.teacher.proj_norm
+                    _d4_adapter_parameters = [
+                        parameter
+                        for parameter in _d4_proj.d4_adapter.parameters()
+                        if parameter.requires_grad
+                    ]
+
+                    _d4_grad_sq = 0.0
+                    _d4_grad_present = False
+                    for _d4_parameter in _d4_adapter_parameters:
+                        if _d4_parameter.grad is not None:
+                            _d4_grad_present = True
+                            _d4_grad_sq += float(
+                                _d4_parameter.grad.detach().pow(2).sum().item()
+                            )
+                    _d4_grad_norm = math.sqrt(_d4_grad_sq)
+
+                    if not _d4_grad_present or _d4_grad_norm <= 0.0:
+                        raise RuntimeError(
+                            '[D4] frozen-detector task loss produced no '
+                            'adapter gradient'
+                        )
+
+                    metric_logger.update(det_loss_s=d4_det_loss)
+
+                    if (dist_utils.is_main_process()
+                            and global_step % max(1, print_freq) == 0):
+                        _d4_stats = getattr(
+                            _d4_proj, '_d4_last_stats', None
+                        )
+                        if _d4_stats is None:
+                            raise RuntimeError(
+                                '[D4] residual statistics unavailable'
+                            )
+                        print(
+                            '[D4] step={} raw_rpn_loss={:.6f} '
+                            'raw_roi_loss={:.6f} raw_det_loss={:.6f} '
+                            'adapter_grad_norm={:.8f} '
+                            'correction_mean={:.8f} '
+                            'correction_max={:.8f}'.format(
+                                global_step,
+                                float(d4_rpn_loss.detach().item()),
+                                float(d4_roi_loss.detach().item()),
+                                float(d4_det_loss.detach().item()),
+                                _d4_grad_norm,
+                                float(_d4_stats[
+                                    'correction_abs_mean'].item()),
+                                float(_d4_stats[
+                                    'correction_abs_max'].item()),
+                            )
+                        )
+
+                    del d4_rpn_loss, d4_roi_loss, d4_det_loss
+                    del loss_dict_d4
+                    torch.cuda.empty_cache()
+
+                elif _exp_loop in ('D1', 'D2', 'D3'):
                     # Preserve the legacy AHDR reconstruction/attention losses
                     # exactly, then add a separate frozen-detector guidance
                     # forward.  mode_training=1 reaches ModuleSet mode=5,
@@ -656,10 +753,18 @@ a3_controller=None):
                         + loss_dict_d1['rcnn_reg_loss_w']
                     )
                     d1_det_loss = d1_rpn_loss + d1_roi_loss
-                    _d1_det_weight = float(os.environ.get(
-                        'SNORM_D2_DET_WEIGHT' if _exp_loop == 'D2' else 'SNORM_D1_DET_WEIGHT',
-                        '0.005' if _exp_loop == 'D2' else '0.01'
-                    ))
+                    if _exp_loop == 'D3':
+                        _d1_det_weight = float(os.environ.get(
+                            'SNORM_D3_DET_WEIGHT', '0.01'
+                        ))
+                    elif _exp_loop == 'D2':
+                        _d1_det_weight = float(os.environ.get(
+                            'SNORM_D2_DET_WEIGHT', '0.005'
+                        ))
+                    else:
+                        _d1_det_weight = float(os.environ.get(
+                            'SNORM_D1_DET_WEIGHT', '0.01'
+                        ))
                     if _d1_det_weight <= 0.0:
                         raise RuntimeError(
                             '[D1] SNORM_D1_DET_WEIGHT must be positive'
@@ -750,12 +855,13 @@ a3_controller=None):
                     if (dist_utils.is_main_process()
                             and _d1_should_check_grad):
                         print(
-                            '[{}] step={} raw_ahdr_loss={:.6f} '.format(_exp_loop, global_step) +
+                            '[{}] step={} raw_ahdr_loss={:.6f} '.format(
+                                _exp_loop, global_step,
+                                float(raw_ahdr_loss.detach().item())) +
                             'raw_rpn_loss={:.6f} raw_roi_loss={:.6f} '
                             'raw_det_loss={:.6f} det_weight={:.6f} '
                             'weighted_det_loss={:.6f} '
                             'render_grad_norm={:.8f}'.format(
-                                float(raw_ahdr_loss.detach().item()),
                                 float(d1_rpn_loss.detach().item()),
                                 float(d1_roi_loss.detach().item()),
                                 float(d1_det_loss.detach().item()),
@@ -892,6 +998,72 @@ a3_controller=None):
             for optimizer in optimizers:
                     optimizer.step()
 
+            # D3: project every render_net tensor back into a small
+            # E2-centered normalized L2 trust region after the optimizer update.
+            if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D3':
+                _d3_inner = (
+                    model_det.module
+                    if hasattr(model_det, 'module') else model_det
+                )
+                _d3_max_rel_drift = float(os.environ.get(
+                    'SNORM_D3_MAX_REL_DRIFT', '0.002'
+                ))
+                if _d3_max_rel_drift <= 0.0:
+                    raise RuntimeError(
+                        '[D3] SNORM_D3_MAX_REL_DRIFT must be positive'
+                    )
+
+                _d3_max_observed_rel = 0.0
+                with torch.no_grad():
+                    for _d3_p in (
+                            _d3_inner.teacher.proj_norm.render_net.parameters()):
+                        if not _d3_p.requires_grad:
+                            continue
+                        if not hasattr(_d3_p, '_d3_e2_center'):
+                            raise RuntimeError(
+                                '[D3] missing E2 center for render_net parameter'
+                            )
+
+                        _d3_center = _d3_p._d3_e2_center
+                        _d3_delta = _d3_p.data - _d3_center
+
+                        _d3_center_norm = float(
+                            _d3_center.norm().item()
+                        )
+                        _d3_floor = (
+                            math.sqrt(float(_d3_p.numel())) * 1e-6
+                        )
+                        _d3_scale = max(_d3_center_norm, _d3_floor)
+
+                        _d3_delta_norm = float(
+                            _d3_delta.norm().item()
+                        )
+                        _d3_rel = _d3_delta_norm / _d3_scale
+
+                        if _d3_rel > _d3_max_rel_drift:
+                            _d3_delta.mul_(
+                                _d3_max_rel_drift / max(_d3_rel, 1e-12)
+                            )
+                            _d3_p.data.copy_(
+                                _d3_center + _d3_delta
+                            )
+                            _d3_rel = _d3_max_rel_drift
+
+                        _d3_max_observed_rel = max(
+                            _d3_max_observed_rel, _d3_rel
+                        )
+
+                if (dist_utils.is_main_process()
+                        and global_step % max(1, print_freq) == 0):
+                    print(
+                        '[D3] step={} max_relative_drift={:.8f} '
+                        'limit={:.8f}'.format(
+                            global_step,
+                            _d3_max_observed_rel,
+                            _d3_max_rel_drift,
+                        )
+                    )
+
             for lr_scheduler in lr_schedulers:
                 lr_scheduler.step()
 
@@ -915,8 +1087,8 @@ a3_controller=None):
             _protected_ddp_exp in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2')
             and dist_utils.get_world_size() > 1
         )
-        _is_d1 = _protected_ddp_exp in ('D1', 'D2')
-        if _protected_ddp_exp == 'D2':
+        _is_d1 = _protected_ddp_exp in ('D1', 'D2', 'D3')
+        if _protected_ddp_exp in ('D2', 'D3'):
             _should_evaluate = (
                 global_step in (100, 200, 300, 500)
                 or (global_step > 500 and global_step % 500 == 0)
@@ -1073,7 +1245,7 @@ def main(det_cfg, args):
     # Apply it before DDP constructs reducer hooks; optimizer setup below
     # repeats and audits the same policy.
     if (args.distributed
-            and os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2')):
+            and os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2', 'D3')):
         for _pre_d1_parameter in model_det.teacher.parameters():
             _pre_d1_parameter.requires_grad_(False)
         for _pre_d1_parameter in model_det.dis.parameters():
@@ -1092,6 +1264,33 @@ def main(det_cfg, args):
                 % _pre_d1_unexpected
             )
         print('[D1 PRE-DDP] render_net-only requires_grad policy applied')
+
+    # D4: preserve the complete E2 network and expose only the tiny
+    # final residual adapter to DDP.
+    if (args.distributed
+            and os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D4'):
+        for _pre_d4_parameter in model_det.teacher.parameters():
+            _pre_d4_parameter.requires_grad_(False)
+        for _pre_d4_parameter in model_det.dis.parameters():
+            _pre_d4_parameter.requires_grad_(False)
+        for _pre_d4_parameter in (
+                model_det.teacher.proj_norm.d4_adapter.parameters()):
+            _pre_d4_parameter.requires_grad_(True)
+
+        _pre_d4_trainable = [
+            name for name, parameter in model_det.teacher.named_parameters()
+            if parameter.requires_grad
+        ]
+        _pre_d4_unexpected = [
+            name for name in _pre_d4_trainable
+            if not name.startswith('proj_norm.d4_adapter.')
+        ]
+        if _pre_d4_unexpected:
+            raise RuntimeError(
+                '[D4 PRE-DDP] unexpected trainable parameters: %s'
+                % _pre_d4_unexpected
+            )
+        print('[D4 PRE-DDP] d4_adapter-only requires_grad policy applied')
 
     # DDP must observe the final B1 requires_grad whitelist when reducer hooks
     # are constructed. The later optimizer setup repeats this idempotently.
@@ -1138,7 +1337,7 @@ def main(det_cfg, args):
             broadcast_buffers=False,
         )
 
-        if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2'):
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2', 'D3'):
             model_det._set_static_graph()
             print('[D1/D2] DDP static graph enabled for reentrant AHDR checkpointing')
        
@@ -1162,13 +1361,13 @@ def main(det_cfg, args):
         '/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/'
         's0_dbias_color_E2_zdh_parallel/E2/best.pth'
     )
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2'):
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2', 'D3', 'D4'):
         if os.path.abspath(_load_path or '') != _fixed_e2_checkpoint:
             raise RuntimeError(
                 'D1 must initialize from read-only E2 checkpoint: %s'
                 % _fixed_e2_checkpoint
             )
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2', 'D1', 'D2'):
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2', 'D1', 'D2', 'D3', 'D4'):
         _protected_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
         if os.path.abspath(_load_path or '') != _fixed_e2_checkpoint:
             raise RuntimeError(
@@ -1194,7 +1393,7 @@ def main(det_cfg, args):
             raise RuntimeError(
                 '%s Fog/Night evaluation protocol changed' % _protected_exp
             )
-        if _protected_exp in ('D1', 'D2'):
+        if _protected_exp in ('D1', 'D2', 'D3', 'D4'):
             if _anchor_sizes != (64, 128, 256, 512):
                 raise RuntimeError(
                     'D1 must use original 12-anchor configuration '
@@ -1311,7 +1510,23 @@ def main(det_cfg, args):
             _incompatible = model_without_ddp.load_state_dict(
                 _state, strict=False
             )
-            if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C3':
+            if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D4':
+                _allowed_missing = {
+                    'teacher.proj_norm.d4_adapter.0.weight',
+                    'teacher.proj_norm.d4_adapter.0.bias',
+                    'teacher.proj_norm.d4_adapter.2.weight',
+                    'teacher.proj_norm.d4_adapter.2.bias',
+                }
+                _missing = set(_incompatible.missing_keys)
+                _unexpected = set(_incompatible.unexpected_keys)
+                if _missing != _allowed_missing or _unexpected:
+                    raise RuntimeError(
+                        'D4 checkpoint incompatibility: missing=%s unexpected=%s'
+                        % (sorted(_missing), sorted(_unexpected))
+                    )
+                print('[D4 CHECKPOINT] official E2 loaded; '
+                      'only zero-init adapter parameters are new')
+            elif os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C3':
                 _allowed_missing = {
                     'teacher.detection_benefit_predictor.encoder.weight',
                     'teacher.detection_benefit_predictor.encoder.bias',
@@ -1357,10 +1572,12 @@ def main(det_cfg, args):
         work_dir = os.path.join(work_dir, _work_suffix)
         os.makedirs(work_dir, exist_ok=True)
         print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
-    if _exp_wd in ('D1', 'D2'):
+    if _exp_wd in ('D1', 'D2', 'D3', 'D4'):
         _d1_best_path = os.path.join(work_dir, 'best.txt')
-        if _exp_wd == 'D2':
-            # The E2 initialization is the true step-0 baseline.
+        if _exp_wd in ('D2', 'D3', 'D4'):
+            # D2/D3 both start from the official E2 best checkpoint.
+            # Therefore E2 is the true step-0 baseline and a degraded
+            # D2/D3 evaluation must never be saved as best.
             current_foggy_mAP = 0.4123
             current_night_mAP = 0.4196
             best_sum_mAP = 0.8318
@@ -1411,8 +1628,10 @@ def main(det_cfg, args):
                 best_sum_mAP
             ))
         else:
-            if _exp_wd == 'D2':
-                print('[D2] step-0 E2 baseline: Fog=0.4123 Night=0.4196 Sum=0.8318')
+            if _exp_wd in ('D2', 'D3'):
+                print('[{}] step-0 E2 baseline: Fog=0.4123 Night=0.4196 Sum=0.8318'.format(
+                    _exp_wd
+                ))
             else:
                 print('[D1] no historical best found')
     if args.test_only:
@@ -1436,7 +1655,127 @@ def main(det_cfg, args):
               _rn = _proj.render_net
               _sp = getattr(_proj, 'sigma_weight_pred', None)
               def _count(_params): return sum(p.numel() for p in _params)
-              if _exp in ('D1', 'D2'):
+              if _exp == 'D4':
+                  _d4_incompatible = []
+                  if bool(det_cfg.C1_SOURCE_DIVERSIFICATION.ENABLED):
+                      _d4_incompatible.append('C1_SOURCE_DIVERSIFICATION')
+                  if bool(det_cfg.SELECTIVE_AHDR.ENABLED):
+                      _d4_incompatible.append('SELECTIVE_AHDR')
+                  if bool(det_cfg.C2_STRUCTURE_GUIDANCE.ENABLED):
+                      _d4_incompatible.append('C2_STRUCTURE_GUIDANCE')
+                  if bool(det_cfg.C3_DETECTION_BENEFIT.ENABLED):
+                      _d4_incompatible.append('C3_DETECTION_BENEFIT')
+                  if bool(det_cfg.C3V2_DETECTION_SEMANTIC_BENEFIT.ENABLED):
+                      _d4_incompatible.append(
+                          'C3V2_DETECTION_SEMANTIC_BENEFIT')
+                  if bool(det_cfg.B2_OBJECT_AWARE.ENABLED):
+                      _d4_incompatible.append('B2_OBJECT_AWARE')
+                  if _d4_incompatible:
+                      raise RuntimeError(
+                          '[D4] incompatible mechanisms must be disabled: %s'
+                          % _d4_incompatible
+                      )
+
+                  for _parameter in _teacher.parameters():
+                      _parameter.requires_grad_(False)
+                  for _parameter in _dis.parameters():
+                      _parameter.requires_grad_(False)
+
+                  _d4_adapter = _proj.d4_adapter
+                  _d4_parameters = list(_d4_adapter.parameters())
+                  for _parameter in _d4_parameters:
+                      _parameter.requires_grad_(True)
+
+                  _d4_trainable_names = [
+                      name for name, parameter in _teacher.named_parameters()
+                      if parameter.requires_grad
+                  ]
+                  _d4_unexpected = [
+                      name for name in _d4_trainable_names
+                      if not name.startswith('proj_norm.d4_adapter.')
+                  ]
+                  if _d4_unexpected:
+                      raise RuntimeError(
+                          '[D4] unexpected trainable teacher parameters: %s'
+                          % _d4_unexpected
+                      )
+
+                  _d4_adapter_count = _count(
+                      parameter for parameter in _d4_parameters
+                      if parameter.requires_grad
+                  )
+                  _d4_render_count = _count(
+                      parameter for parameter in _rn.parameters()
+                      if parameter.requires_grad
+                  )
+                  _d4_teacher_count = _count(
+                      parameter for parameter in _teacher.parameters()
+                      if parameter.requires_grad
+                  )
+
+                  _d4_detector_modules = (
+                      ('backbone_0', _teacher.backbone_0),
+                      ('backbone_1', _teacher.backbone_1),
+                      ('backbone_2', _teacher.backbone_2),
+                      ('backbone_3', _teacher.backbone_3),
+                      ('rpn_norm', _teacher.rpn_norm),
+                      ('box_head_norm', _teacher.box_head_norm),
+                      ('rpn_eval', _teacher.rpn_eval),
+                      ('box_head_eval', _teacher.box_head_eval),
+                  )
+                  _d4_detector_count = sum(
+                      parameter.numel()
+                      for _, module in _d4_detector_modules
+                      for parameter in module.parameters()
+                      if parameter.requires_grad
+                  )
+
+                  if _d4_adapter_count != 59:
+                      raise RuntimeError(
+                          '[D4] adapter trainable parameter count must be 59; '
+                          'got %s' % _d4_adapter_count
+                      )
+                  if _d4_render_count != 0:
+                      raise RuntimeError(
+                          '[D4] E2 render_net must remain frozen; got %s'
+                          % _d4_render_count
+                      )
+                  if _d4_detector_count != 0:
+                      raise RuntimeError(
+                          '[D4] detector must remain frozen; got %s'
+                          % _d4_detector_count
+                      )
+                  if _d4_teacher_count != 59:
+                      raise RuntimeError(
+                          '[D4] total teacher trainable params must be 59; '
+                          'got %s' % _d4_teacher_count
+                      )
+
+                  _d4_lr = float(os.environ.get('SNORM_D4_LR', '1e-4'))
+                  if _d4_lr <= 0.0:
+                      raise RuntimeError('[D4] SNORM_D4_LR must be positive')
+
+                  model_paramters += [{
+                      'params': _d4_parameters,
+                      'lr': _d4_lr,
+                      'name': 'd4_final_residual_adapter',
+                  }]
+
+                  print('  [D4] Frozen-E2 Final Residual Adaptation')
+                  print('  [D4] E2 render_net trainable params:',
+                        _d4_render_count)
+                  print('  [D4] detector trainable params:',
+                        _d4_detector_count)
+                  print('  [D4] adapter trainable params:',
+                        _d4_adapter_count)
+                  print('  [D4] total teacher trainable params:',
+                        _d4_teacher_count)
+                  print('  [D4] LR:', _d4_lr)
+                  print('  [D4] ALPHA:',
+                        float(os.environ.get('SNORM_D4_ALPHA', '0.05')))
+                  a3_controller = None
+
+              elif _exp in ('D1', 'D2', 'D3'):
                   _d1_incompatible = []
                   if bool(det_cfg.C1_SOURCE_DIVERSIFICATION.ENABLED):
                       _d1_incompatible.append('C1_SOURCE_DIVERSIFICATION')
@@ -1508,9 +1847,18 @@ def main(det_cfg, args):
                           '[D1] detector trainable parameter count must be 0; '
                           'got %s' % _d1_detector_count
                       )
-                  _d1_det_weight = float(os.environ.get(
-                      'SNORM_D1_DET_WEIGHT', '0.01'
-                  ))
+                  if _exp == 'D3':
+                      _d1_det_weight = float(os.environ.get(
+                          'SNORM_D3_DET_WEIGHT', '0.01'
+                      ))
+                  elif _exp == 'D2':
+                      _d1_det_weight = float(os.environ.get(
+                          'SNORM_D2_DET_WEIGHT', '0.005'
+                      ))
+                  else:
+                      _d1_det_weight = float(os.environ.get(
+                          'SNORM_D1_DET_WEIGHT', '0.01'
+                      ))
                   if _d1_det_weight <= 0.0:
                       raise RuntimeError(
                           '[D1] SNORM_D1_DET_WEIGHT must be positive'
@@ -1520,10 +1868,18 @@ def main(det_cfg, args):
                       _d1_lr = float(os.environ.get('SNORM_D2_LR', '5e-6'))
                       for _parameter in _d1_render_parameters:
                           _parameter._d2_e2_anchor = _parameter.detach().clone()
+                  elif _exp == 'D3':
+                      _d1_lr = float(os.environ.get('SNORM_D3_LR', '1e-6'))
+                      for _parameter in _d1_render_parameters:
+                          # Fixed E2 center. Plain tensor by design: it must not
+                          # enter the optimizer or receive gradients.
+                          _parameter._d3_e2_center = _parameter.detach().clone()
                   model_paramters += [{
                       'params': _d1_render_parameters,
                       'lr': _d1_lr,
-                      'name': 'd2_render_net' if _exp == 'D2' else 'd1_render_net',
+                      'name': ('d3_render_net' if _exp == 'D3'
+                               else 'd2_render_net' if _exp == 'D2'
+                               else 'd1_render_net'),
                   }]
                   print('  [D1] Frozen-Detector Task-Guided AHDR')
                   print('  [D1] render_net trainable params:',
@@ -1540,6 +1896,10 @@ def main(det_cfg, args):
                   if _exp == 'D2':
                       print('  [D2] LR:', _d1_lr)
                       print('  [D2] ANCHOR_WEIGHT:', float(os.environ.get('SNORM_D2_ANCHOR_WEIGHT', '10.0')))
+                  elif _exp == 'D3':
+                      print('  [D3] LR:', _d1_lr)
+                      print('  [D3] MAX_REL_DRIFT:',
+                            float(os.environ.get('SNORM_D3_MAX_REL_DRIFT', '0.002')))
                   a3_controller = None
               elif _exp in ('B1', 'B2'):
                   if not _is_small_anchor_a:
