@@ -32,6 +32,12 @@ from detection.modeling.norm.detection_benefit import (
     DetectionBenefitPredictor,
     DetectionSemanticBenefitPredictor,
 )
+from detection.modeling.cdfkd import (
+    ConservativeSourceDiversification,
+    SpatialEnhancementAdapter,
+    global_feature_distillation,
+    instance_feature_distillation,
+)
 #from detection.modeling.norm.R202509x.SNorm_0322_valid_refine_expmamba import SNorm
 
 #
@@ -198,6 +204,15 @@ class ModuleSet(nn.Module):
         self.ada_layers_rois = []
 
         self.positive_fraction = positive_fraction
+        self.cdfkd_adapter = None
+        self.cdfkd_diversification = None
+        self._cdfkd_identity_checked = False
+        if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD':
+            self.cdfkd_adapter = SpatialEnhancementAdapter(
+                hidden_channels=int(os.environ.get('SNORM_CDFKD_ADAPTER_CHANNELS', '64')),
+                residual_scale=float(os.environ.get('SNORM_CDFKD_RESIDUAL_SCALE', '0.10')),
+            )
+            self.cdfkd_diversification = ConservativeSourceDiversification()
     
     def prev_norm(self, x):
         
@@ -220,6 +235,60 @@ class ModuleSet(nn.Module):
 
         #x = self.backbone_2n(x)
         return x
+
+    def forward_cdfkd(self, images, img_metas, targets):
+        """Frozen-E2/frozen-detector Stage-A path; only adapter is trainable."""
+        if self.cdfkd_adapter is None or self.cdfkd_diversification is None:
+            raise RuntimeError('CDFKD modules require SNORM_EXPERIMENT=CDFKD')
+        diversified, diversification_stats = self.cdfkd_diversification(images)
+        with torch.no_grad():
+            reference_image, _ = self.dist_prog(
+                images.detach(), targets, stride=8, force_eval_render=True,
+            )
+            student_base, _ = self.dist_prog(
+                diversified.detach(), targets, stride=8, force_eval_render=True,
+            )
+            reference_feature = self.back_norm_w_snorm(reference_image).detach()
+
+        student_image = self.cdfkd_adapter(student_base.detach())
+        if not self._cdfkd_identity_checked:
+            difference = (student_image.detach() - student_base.detach()).abs()
+            mean_difference = float(difference.mean().item())
+            max_difference = float(difference.max().item())
+            print('[CDFKD IDENTITY CHECK] mean_abs_diff={:.10f} max_abs_diff={:.10f}'.format(
+                mean_difference, max_difference
+            ))
+            if max_difference > 1e-7:
+                raise RuntimeError('CDFKD adapter is not identity-initialized')
+            self._cdfkd_identity_checked = True
+
+        # Parameters are frozen, but this forward intentionally keeps autograd
+        # so detector and FKD losses reach the spatial adapter input.
+        student_feature = self.back_norm_w_snorm(student_image)
+        proposals, rpn_losses, _, _ = self.rpn_norm(
+            student_image, student_feature, img_metas, targets
+        )
+        _, box_losses, _, _, _, _, _, _, _ = self.box_head_norm(
+            student_feature, proposals, img_metas, targets
+        )
+        loss_global = global_feature_distillation(
+            reference_feature, student_feature
+        )
+        loss_instance = instance_feature_distillation(
+            reference_feature, student_feature, self.box_head_norm.pooler,
+            targets, img_metas,
+        )
+        return {
+            'rpn_losses': rpn_losses,
+            'box_losses': box_losses,
+            'reference_feature': reference_feature,
+            'student_feature': student_feature,
+            'student_image': student_image,
+            'student_base': student_base.detach(),
+            'loss_global': loss_global,
+            'loss_instance': loss_instance,
+            'diversification': diversification_stats,
+        }
     
 
     def forward_resnet101(self, x):
@@ -330,6 +399,9 @@ class ModuleSet(nn.Module):
                 
             features_norm, feat_dict = self.dist_prog(features_prev.detach(), targets, stride=8, domain=domain, \
             use_dbiase=use_dbiase, moe_mode=moe_mode, moe_mark=moe_mark)
+            if (os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD'
+                    and self.cdfkd_adapter is not None):
+                features_norm = self.cdfkd_adapter(features_norm)
             # 保存渲染结果用于评估可视化
             self._last_render_features = features_norm.detach()
             #features_norm = features_prev
