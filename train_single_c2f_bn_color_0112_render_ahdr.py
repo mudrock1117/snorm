@@ -4,6 +4,7 @@ import math
 import os
 import time
 import copy
+import itertools
 import random
 import signal
 import subprocess
@@ -146,7 +147,8 @@ def convert_sync_batchnorm(model):
 
 
 def set_d1_frozen_detector_bn_eval(model):
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') not in ('D1', 'D2'):
+    _experiment = os.environ.get('SNORM_EXPERIMENT', 'E0')
+    if _experiment not in ('D1', 'D2', 'CDFKD'):
         return 0
     model_inner = model.module if hasattr(model, 'module') else model
     teacher = model_inner.teacher
@@ -177,9 +179,19 @@ def set_d1_frozen_detector_bn_eval(model):
         raise RuntimeError(
             '[D1] frozen detector BatchNorm/SyncBatchNorm remained in train mode'
         )
-    if not teacher.proj_norm.render_net.training:
+    if _experiment in ('D1', 'D2') and not teacher.proj_norm.render_net.training:
         raise RuntimeError('[D1] render_net must remain in train mode')
     return len(frozen_batch_norms)
+
+
+def _parameter_grad_norm(parameters):
+    squared = None
+    for parameter in parameters:
+        if parameter.grad is None:
+            continue
+        value = parameter.grad.detach().float().pow(2).sum()
+        squared = value if squared is None else squared + value
+    return 0.0 if squared is None else float(squared.sqrt().item())
 
 def term_sig_hanlder(signum, frame):
     global global_end
@@ -602,6 +614,86 @@ a3_controller=None):
                     del total_loss, selected_detection_loss
                     del loss_dict_det, outputs_det
                     torch.cuda.empty_cache()
+                elif _exp_loop == 'CDFKD':
+                    loss_dict_cdfkd, outputs_cdfkd = model_det(
+                        images, img_metas, s_targets, mode_training=17,
+                        step_iter=global_step, is_update=False,
+                    )
+                    _cdfkd = outputs_cdfkd['cdfkd']
+                    _det_keys = (
+                        'rpn_cls_loss_w', 'rpn_reg_loss_w',
+                        'rcnn_cls_loss_w', 'rcnn_reg_loss_w',
+                    )
+                    _missing = [key for key in _det_keys
+                                if key not in loss_dict_cdfkd]
+                    if _missing:
+                        raise RuntimeError(
+                            '[CDFKD] detection losses missing: %s' % _missing
+                        )
+                    raw_det_loss = sum(loss_dict_cdfkd[key]
+                                       for key in _det_keys)
+                    raw_global_loss = _cdfkd['loss_global']
+                    raw_instance_loss = _cdfkd['loss_instance']
+                    total_cdfkd_loss = sum(loss_dict_cdfkd.values())
+                    total_cdfkd_loss.backward()
+
+                    _cdfkd_inner = (model_det.module
+                                    if hasattr(model_det, 'module')
+                                    else model_det)
+                    _adapter = _cdfkd_inner.teacher.cdfkd_adapter
+                    _adapter_grad = _parameter_grad_norm(
+                        _adapter.parameters()
+                    )
+                    _render_grad = _parameter_grad_norm(
+                        _cdfkd_inner.teacher.proj_norm.render_net.parameters()
+                    )
+                    _detector_grad = _parameter_grad_norm(
+                        itertools.chain(
+                            _cdfkd_inner.teacher.backbone_0.parameters(),
+                            _cdfkd_inner.teacher.backbone_1.parameters(),
+                            _cdfkd_inner.teacher.backbone_2.parameters(),
+                            _cdfkd_inner.teacher.backbone_3.parameters(),
+                            _cdfkd_inner.teacher.rpn_norm.parameters(),
+                            _cdfkd_inner.teacher.box_head_norm.parameters(),
+                        )
+                    )
+                    if _adapter_grad <= 0.0:
+                        raise RuntimeError(
+                            '[CDFKD] losses produced no adapter gradient'
+                        )
+                    if _render_grad != 0.0 or _detector_grad != 0.0:
+                        raise RuntimeError(
+                            '[CDFKD] frozen E2/detector received gradients: '
+                            'render={:.6e}, detector={:.6e}'.format(
+                                _render_grad, _detector_grad
+                            )
+                        )
+
+                    metric_logger.update(det_loss_s=total_cdfkd_loss)
+                    metric_logger.update(raw_det_loss=raw_det_loss)
+                    metric_logger.update(raw_global_loss=raw_global_loss)
+                    metric_logger.update(raw_instance_loss=raw_instance_loss)
+                    if (dist_utils.is_main_process()
+                            and global_step % max(1, print_freq) == 0):
+                        print(
+                            '[CDFKD TRAIN] step={} total={:.6f} det={:.6f} '
+                            'global={:.6f} instance={:.6f}'.format(
+                                global_step,
+                                float(total_cdfkd_loss.detach().item()),
+                                float(raw_det_loss.detach().item()),
+                                float(raw_global_loss.detach().item()),
+                                float(raw_instance_loss.detach().item()),
+                            )
+                        )
+                        print(
+                            '[CDFKD GRAD] adapter/render/detector = '
+                            '{:.6e}/{:.6e}/{:.6e}'.format(
+                                _adapter_grad, _render_grad, _detector_grad
+                            )
+                        )
+                        print('[CDFKD SOURCE]', _cdfkd['diversification'])
+                    del total_cdfkd_loss, loss_dict_cdfkd, outputs_cdfkd
+                    torch.cuda.empty_cache()
                 elif _exp_loop in ('D1', 'D2'):
                     # Preserve the legacy AHDR reconstruction/attention losses
                     # exactly, then add a separate frozen-detector guidance
@@ -916,7 +1008,12 @@ a3_controller=None):
             and dist_utils.get_world_size() > 1
         )
         _is_d1 = _protected_ddp_exp in ('D1', 'D2')
-        if _protected_ddp_exp == 'D2':
+        if _protected_ddp_exp == 'CDFKD':
+            _should_evaluate = (
+                global_step in (100, 200, 300, 500, 1000)
+                or (global_step > 1000 and global_step % 500 == 0)
+            )
+        elif _protected_ddp_exp == 'D2':
             _should_evaluate = (
                 global_step in (100, 200, 300, 500)
                 or (global_step > 500 and global_step % 500 == 0)
@@ -1069,6 +1166,26 @@ def main(det_cfg, args):
     model_det = build_detectors(det_cfg)
     model_det.to(device)
 
+    if (args.distributed
+            and os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD'):
+        for _pre_cdfkd_parameter in model_det.parameters():
+            _pre_cdfkd_parameter.requires_grad_(False)
+        for _pre_cdfkd_parameter in (
+                model_det.teacher.cdfkd_adapter.parameters()):
+            _pre_cdfkd_parameter.requires_grad_(True)
+        _pre_cdfkd_names = [
+            name for name, parameter in model_det.named_parameters()
+            if parameter.requires_grad
+        ]
+        if (not _pre_cdfkd_names
+                or any(not name.startswith('teacher.cdfkd_adapter.')
+                       for name in _pre_cdfkd_names)):
+            raise RuntimeError(
+                '[CDFKD PRE-DDP] trainable whitelist failed: %s'
+                % _pre_cdfkd_names
+            )
+        print('[CDFKD PRE-DDP] adapter-only requires_grad policy applied')
+
     # D1 has a stricter whitelist than every detector-training experiment.
     # Apply it before DDP constructs reducer hooks; optimizer setup below
     # repeats and audits the same policy.
@@ -1162,13 +1279,13 @@ def main(det_cfg, args):
         '/home/ubuntu/hdx/snorm_E2_repro/debug/city_2_foggy/'
         's0_dbias_color_E2_zdh_parallel/E2/best.pth'
     )
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2'):
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2', 'CDFKD'):
         if os.path.abspath(_load_path or '') != _fixed_e2_checkpoint:
             raise RuntimeError(
                 'D1 must initialize from read-only E2 checkpoint: %s'
                 % _fixed_e2_checkpoint
             )
-    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2', 'D1', 'D2'):
+    if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('B1', 'B2', 'C1', 'C2', 'C3', 'C3V2', 'D1', 'D2', 'CDFKD'):
         _protected_exp = os.environ.get('SNORM_EXPERIMENT', 'E0')
         if os.path.abspath(_load_path or '') != _fixed_e2_checkpoint:
             raise RuntimeError(
@@ -1194,7 +1311,7 @@ def main(det_cfg, args):
             raise RuntimeError(
                 '%s Fog/Night evaluation protocol changed' % _protected_exp
             )
-        if _protected_exp in ('D1', 'D2'):
+        if _protected_exp in ('D1', 'D2', 'CDFKD'):
             if _anchor_sizes != (64, 128, 256, 512):
                 raise RuntimeError(
                     'D1 must use original 12-anchor configuration '
@@ -1311,7 +1428,27 @@ def main(det_cfg, args):
             _incompatible = model_without_ddp.load_state_dict(
                 _state, strict=False
             )
-            if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C3':
+            if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD':
+                _allowed_missing = {
+                    'teacher.cdfkd_adapter.project_in.weight',
+                    'teacher.cdfkd_adapter.project_in.bias',
+                    'teacher.cdfkd_adapter.spatial.weight',
+                    'teacher.cdfkd_adapter.spatial.bias',
+                    'teacher.cdfkd_adapter.mix.weight',
+                    'teacher.cdfkd_adapter.mix.bias',
+                    'teacher.cdfkd_adapter.project_out.weight',
+                    'teacher.cdfkd_adapter.project_out.bias',
+                }
+                _missing = set(_incompatible.missing_keys)
+                _unexpected = set(_incompatible.unexpected_keys)
+                if _missing != _allowed_missing or _unexpected:
+                    raise RuntimeError(
+                        'CDFKD checkpoint incompatibility: '
+                        'missing=%s unexpected=%s'
+                        % (sorted(_missing), sorted(_unexpected))
+                    )
+                print('[CDFKD CHECKPOINT] only spatial adapter is new')
+            elif os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C3':
                 _allowed_missing = {
                     'teacher.detection_benefit_predictor.encoder.weight',
                     'teacher.detection_benefit_predictor.encoder.bias',
@@ -1436,7 +1573,46 @@ def main(det_cfg, args):
               _rn = _proj.render_net
               _sp = getattr(_proj, 'sigma_weight_pred', None)
               def _count(_params): return sum(p.numel() for p in _params)
-              if _exp in ('D1', 'D2'):
+              if _exp == 'CDFKD':
+                  for _parameter in model_without_ddp.parameters():
+                      _parameter.requires_grad_(False)
+                  _cdfkd_adapter_parameters = list(
+                      _teacher.cdfkd_adapter.parameters()
+                  )
+                  for _parameter in _cdfkd_adapter_parameters:
+                      _parameter.requires_grad_(True)
+                  _cdfkd_trainable_names = [
+                      name for name, parameter in
+                      model_without_ddp.named_parameters()
+                      if parameter.requires_grad
+                  ]
+                  if (not _cdfkd_trainable_names
+                          or any(not name.startswith(
+                              'teacher.cdfkd_adapter.'
+                          ) for name in _cdfkd_trainable_names)):
+                      raise RuntimeError(
+                          '[CDFKD] trainable whitelist failed: %s'
+                          % _cdfkd_trainable_names
+                      )
+                  _cdfkd_count = _count(_cdfkd_adapter_parameters)
+                  if _cdfkd_count <= 0:
+                      raise RuntimeError('[CDFKD] adapter has no parameters')
+                  _cdfkd_lr = float(os.environ.get(
+                      'SNORM_CDFKD_LR', '1e-4'
+                  ))
+                  if _cdfkd_lr <= 0.0:
+                      raise RuntimeError('[CDFKD] LR must be positive')
+                  model_paramters += [{
+                      'params': _cdfkd_adapter_parameters,
+                      'lr': _cdfkd_lr,
+                      'name': 'cdfkd_spatial_adapter',
+                  }]
+                  print('  [CDFKD] Spatial Adapter trainable params:',
+                        _cdfkd_count)
+                  print('  [CDFKD] E2/render/detector trainable params: 0')
+                  print('  [CDFKD] LR:', _cdfkd_lr)
+                  a3_controller = None
+              elif _exp in ('D1', 'D2'):
                   _d1_incompatible = []
                   if bool(det_cfg.C1_SOURCE_DIVERSIFICATION.ENABLED):
                       _d1_incompatible.append('C1_SOURCE_DIVERSIFICATION')
@@ -1756,6 +1932,20 @@ def main(det_cfg, args):
                       sum(p.numel() for p in _group_params if p.requires_grad)
                   ))
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
+          if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD':
+              _cdfkd_allowed_optimizer_ids = set(
+                  id(parameter) for parameter in
+                  model_without_ddp.teacher.cdfkd_adapter.parameters()
+              )
+              _cdfkd_optimizer_ids = set(
+                  id(parameter)
+                  for group in optimizer_model.param_groups
+                  for parameter in group['params']
+              )
+              if _cdfkd_optimizer_ids != _cdfkd_allowed_optimizer_ids:
+                  raise RuntimeError(
+                      '[CDFKD] optimizer parameters are not exactly adapter'
+                  )
           if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
               _d1_allowed_optimizer_ids = set(
                   id(parameter)

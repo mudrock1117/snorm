@@ -423,6 +423,28 @@ class FasterRCNN(nn.Module):
                 }
                 outputs_teacher = outputs
 
+            ########CDFKD frozen detector + spatial enhancement adapter########
+            elif mode_training == 17:
+                if os.environ.get('SNORM_EXPERIMENT', 'E0') != 'CDFKD':
+                    raise RuntimeError('mode_training=17 is reserved for CDFKD')
+                cdfkd = self.teacher.forward_cdfkd(
+                    tc_images, img_metas, targets_
+                )
+                for key, value in cdfkd['rpn_losses'].items():
+                    loss_dict.update({key + '_w': value})
+                for key, value in cdfkd['box_losses'].items():
+                    loss_dict.update({key + '_w': value})
+                alpha = float(os.environ.get('SNORM_CDFKD_GLOBAL_W', '0.5'))
+                beta = float(os.environ.get('SNORM_CDFKD_INSTANCE_W', '1.0'))
+                if alpha < 0.0 or beta < 0.0:
+                    raise ValueError('CDFKD loss weights must be non-negative')
+                loss_dict['cdfkd_global'] = alpha * cdfkd['loss_global']
+                loss_dict['cdfkd_instance'] = beta * cdfkd['loss_instance']
+                outputs['cdfkd'] = cdfkd
+                outputs['cdfkd']['alpha'] = alpha
+                outputs['cdfkd']['beta'] = beta
+                outputs_teacher = outputs
+
             ########detection + e-net########
             elif mode_training == 1:
                 if stsc_trans is not None:
