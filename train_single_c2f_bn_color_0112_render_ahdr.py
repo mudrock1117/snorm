@@ -1759,8 +1759,24 @@ def main(det_cfg, args):
     if _exp_wd != 'E0':
         _work_suffix = 'E2' if _exp_wd in ('A3', 'A4', 'B1', 'B2', 'C1', 'C2', 'C3', 'C3V2') else _exp_wd
         work_dir = os.path.join(work_dir, _work_suffix)
+
+        # Isolate CDFKD presets so checkpoints and evaluation logs do not mix.
+        if _exp_wd == 'CDFKD':
+            _cdfkd_preset_wd = os.environ.get(
+                'SNORM_CDFKD_PRESET', 'baseline'
+            ).strip().lower()
+            work_dir = os.path.join(work_dir, _cdfkd_preset_wd)
+            print(
+                f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, '
+                f'preset={_cdfkd_preset_wd}, work_dir={work_dir}'
+            )
+        else:
+            print(
+                f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, '
+                f'work_dir={work_dir}'
+            )
+
         os.makedirs(work_dir, exist_ok=True)
-        print(f'  [WORK_DIR] SNORM_EXPERIMENT={_exp_wd}, work_dir={work_dir}')
     if _exp_wd in ('D1', 'D2', 'D3', 'D4'):
         _d1_best_path = os.path.join(work_dir, 'best.txt')
         if _exp_wd in ('D2', 'D3', 'D4'):
