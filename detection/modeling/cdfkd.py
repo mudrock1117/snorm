@@ -8,6 +8,76 @@ from torch import nn
 import torch.nn.functional as F
 
 
+_PRESETS = {
+    'baseline': dict(adapter_type='basic', rgb_adapter=True,
+                     feature_adapter=False, div_strength='conservative',
+                     global_weight=0.5, instance_weight=1.0),
+    'det_dominant': dict(adapter_type='basic', rgb_adapter=True,
+                         feature_adapter=False, div_strength='conservative',
+                         global_weight=0.1, instance_weight=0.25),
+    'multiscale': dict(adapter_type='multiscale', rgb_adapter=True,
+                       feature_adapter=False, div_strength='conservative',
+                       global_weight=0.1, instance_weight=0.25),
+    'feature': dict(adapter_type='basic', rgb_adapter=False,
+                    feature_adapter=True, div_strength='conservative',
+                    global_weight=0.1, instance_weight=0.25),
+    'combined': dict(adapter_type='multiscale', rgb_adapter=True,
+                     feature_adapter=True, div_strength='medium',
+                     global_weight=0.1, instance_weight=0.25),
+}
+
+
+def _env_bool(value):
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def resolve_cdfkd_config(environ=None):
+    """Resolve presets first, then explicit environment overrides."""
+    env = os.environ if environ is None else environ
+    preset = env.get('SNORM_CDFKD_PRESET', 'baseline').strip().lower()
+    if preset not in _PRESETS:
+        raise ValueError('Unknown SNORM_CDFKD_PRESET: %s' % preset)
+    config = dict(_PRESETS[preset])
+    if _env_bool(env.get('SNORM_CDFKD_ACCURACY_MODE', '0')):
+        if 'SNORM_CDFKD_GLOBAL_W' not in env:
+            config['global_weight'] = 0.1
+        if 'SNORM_CDFKD_INSTANCE_W' not in env:
+            config['instance_weight'] = 0.25
+    overrides = {
+        'SNORM_CDFKD_ADAPTER_TYPE': ('adapter_type', str),
+        'SNORM_CDFKD_RGB_ADAPTER': ('rgb_adapter', _env_bool),
+        'SNORM_CDFKD_FEATURE_ADAPTER': ('feature_adapter', _env_bool),
+        'SNORM_CDFKD_DIV_STRENGTH': ('div_strength', str),
+        'SNORM_CDFKD_GLOBAL_W': ('global_weight', float),
+        'SNORM_CDFKD_INSTANCE_W': ('instance_weight', float),
+    }
+    for name, (key, parser) in overrides.items():
+        if name in env:
+            config[key] = parser(env[name])
+    config.update({
+        'preset': preset,
+        'det_weight': float(env.get('SNORM_CDFKD_DET_W', '1.0')),
+        'instance_mode': env.get('SNORM_CDFKD_INSTANCE_MODE', 'cosine').lower(),
+        'rgb_residual_scale': float(env.get('SNORM_CDFKD_RESIDUAL_SCALE', '0.10')),
+        'feature_residual_scale': float(env.get(
+            'SNORM_CDFKD_FEATURE_RESIDUAL_SCALE', '0.10')),
+        'rgb_channels': int(env.get('SNORM_CDFKD_ADAPTER_CHANNELS', '64')),
+        'feature_channels': int(env.get('SNORM_CDFKD_FEATURE_CHANNELS', '32')),
+    })
+    if config['adapter_type'] not in ('basic', 'multiscale'):
+        raise ValueError('CDFKD adapter type must be basic or multiscale')
+    if config['div_strength'] not in ('conservative', 'medium', 'strong'):
+        raise ValueError('CDFKD diversification strength is invalid')
+    if config['instance_mode'] not in ('cosine', 'weighted'):
+        raise ValueError('CDFKD instance mode must be cosine or weighted')
+    if not config['rgb_adapter'] and not config['feature_adapter']:
+        raise ValueError('CDFKD requires at least one enabled adapter')
+    for key in ('det_weight', 'global_weight', 'instance_weight'):
+        if config[key] < 0.0:
+            raise ValueError('CDFKD %s must be non-negative' % key)
+    return config
+
+
 class SpatialEnhancementAdapter(nn.Module):
     """Small spatial residual adapter with exact identity initialization."""
 
@@ -23,13 +93,73 @@ class SpatialEnhancementAdapter(nn.Module):
         self.project_out = nn.Conv2d(hidden_channels, 3, 1, bias=True)
         nn.init.zeros_(self.project_out.weight)
         nn.init.zeros_(self.project_out.bias)
+        self.last_residual = None
 
     def forward(self, image):
         residual = self.project_in(image)
         residual = F.gelu(self.spatial(residual))
         residual = F.gelu(self.mix(residual))
         residual = self.residual_scale * torch.tanh(self.project_out(residual))
+        self.last_residual = residual.detach()
         return image + residual
+
+    def parameter_count(self):
+        return sum(parameter.numel() for parameter in self.parameters())
+
+
+class MultiScaleSpatialEnhancementAdapter(nn.Module):
+    """Three receptive fields with a zero-initialized RGB residual head."""
+
+    def __init__(self, hidden_channels=64, residual_scale=0.10):
+        super().__init__()
+        self.residual_scale = float(residual_scale)
+        self.stem = nn.Conv2d(3, hidden_channels, 1, bias=True)
+        self.branches = nn.ModuleList([
+            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=dilation,
+                      dilation=dilation, groups=hidden_channels, bias=True)
+            for dilation in (1, 2, 4)
+        ])
+        self.fusion = nn.Conv2d(hidden_channels * 3, hidden_channels, 1,
+                                bias=True)
+        self.project_out = nn.Conv2d(hidden_channels, 3, 1, bias=True)
+        nn.init.zeros_(self.project_out.weight)
+        nn.init.zeros_(self.project_out.bias)
+        self.last_residual = None
+
+    def forward(self, image):
+        stem = F.gelu(self.stem(image))
+        spatial = torch.cat([F.gelu(branch(stem))
+                             for branch in self.branches], dim=1)
+        residual = F.gelu(self.fusion(spatial))
+        residual = self.residual_scale * torch.tanh(self.project_out(residual))
+        self.last_residual = residual.detach()
+        return image + residual
+
+    def parameter_count(self):
+        return sum(parameter.numel() for parameter in self.parameters())
+
+
+class FeatureResidualAdapter(nn.Module):
+    """Shape-preserving bottleneck correction for the single C4 tensor."""
+
+    def __init__(self, in_channels=1024, hidden_channels=32,
+                 residual_scale=0.10):
+        super().__init__()
+        self.residual_scale = float(residual_scale)
+        self.reduce = nn.Conv2d(in_channels, hidden_channels, 1, bias=True)
+        self.spatial = nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1,
+                                 groups=hidden_channels, bias=True)
+        self.project = nn.Conv2d(hidden_channels, in_channels, 1, bias=True)
+        nn.init.zeros_(self.project.weight)
+        nn.init.zeros_(self.project.bias)
+        self.last_residual = None
+
+    def forward(self, feature):
+        residual = F.gelu(self.reduce(feature))
+        residual = F.gelu(self.spatial(residual))
+        residual = self.residual_scale * torch.tanh(self.project(residual))
+        self.last_residual = residual.detach()
+        return feature + residual
 
     def parameter_count(self):
         return sum(parameter.numel() for parameter in self.parameters())
@@ -38,10 +168,28 @@ class SpatialEnhancementAdapter(nn.Module):
 class ConservativeSourceDiversification(object):
     """Source-only appearance corruption with geometry-preserving downscale."""
 
-    def __init__(self):
+    _RANGES = {
+        'conservative': dict(down=(0.80, 1.00), noise=(0.005, 0.020),
+                             shot=(80.0, 160.0), blur=(0.3, 0.8),
+                             contrast=(0.85, 1.15), brightness=(0.85, 1.15),
+                             pixelate=(0.75, 0.90)),
+        'medium': dict(down=(0.70, 1.00), noise=(0.008, 0.030),
+                       shot=(60.0, 140.0), blur=(0.4, 1.0),
+                       contrast=(0.75, 1.25), brightness=(0.75, 1.25),
+                       pixelate=(0.65, 0.88)),
+        'strong': dict(down=(0.60, 1.00), noise=(0.010, 0.040),
+                       shot=(45.0, 120.0), blur=(0.5, 1.2),
+                       contrast=(0.65, 1.35), brightness=(0.65, 1.35),
+                       pixelate=(0.55, 0.85)),
+    }
+
+    def __init__(self, strength='conservative'):
+        self.strength = strength
+        ranges = self._RANGES[strength]
         self.apply_prob = float(os.environ.get('SNORM_CDFKD_AUG_PROB', '0.8'))
-        self.down_min = float(os.environ.get('SNORM_CDFKD_DOWNSCALE_MIN', '0.8'))
-        self.down_max = float(os.environ.get('SNORM_CDFKD_DOWNSCALE_MAX', '1.0'))
+        self.down_min = float(os.environ.get('SNORM_CDFKD_DOWNSCALE_MIN', ranges['down'][0]))
+        self.down_max = float(os.environ.get('SNORM_CDFKD_DOWNSCALE_MAX', ranges['down'][1]))
+        self.ranges = ranges
         if not (0.0 < self.down_min <= self.down_max <= 1.0):
             raise ValueError('CDFKD downscale range must satisfy 0 < min <= max <= 1')
         default_ops = (
@@ -85,22 +233,22 @@ class ConservativeSourceDiversification(object):
         if self.operations and random.random() < self.apply_prob:
             operation = random.choice(self.operations)
             if operation == 'gaussian_noise':
-                image = image + torch.randn_like(image) * random.uniform(0.005, 0.02)
+                image = image + torch.randn_like(image) * random.uniform(*self.ranges['noise'])
             elif operation == 'shot_noise':
-                levels = random.uniform(80.0, 160.0)
+                levels = random.uniform(*self.ranges['shot'])
                 image = torch.poisson(image * levels) / levels
             elif operation == 'defocus_blur':
-                image = self._gaussian_blur(image, random.uniform(0.3, 0.8))
+                image = self._gaussian_blur(image, random.uniform(*self.ranges['blur']))
             elif operation == 'motion_blur':
                 image = self._motion_blur(image)
             elif operation == 'contrast':
                 mean = image.mean((2, 3), keepdim=True)
-                image = mean + random.uniform(0.85, 1.15) * (image - mean)
+                image = mean + random.uniform(*self.ranges['contrast']) * (image - mean)
             elif operation == 'brightness':
-                image = image * random.uniform(0.85, 1.15)
+                image = image * random.uniform(*self.ranges['brightness'])
             elif operation == 'pixelate':
                 height, width = image.shape[-2:]
-                ratio = random.uniform(0.75, 0.90)
+                ratio = random.uniform(*self.ranges['pixelate'])
                 small = F.interpolate(
                     image, size=(max(1, int(height * ratio)), max(1, int(width * ratio))),
                     mode='bilinear', align_corners=False,
@@ -120,7 +268,10 @@ class ConservativeSourceDiversification(object):
                 small, size=(height, width), mode='bilinear', align_corners=False,
             )
         image = image.clamp(0.0, 1.0)
-        return (image - 0.5) / 0.5, {'operation': operation, 'downscale_ratio': ratio}
+        return (image - 0.5) / 0.5, {
+            'operation': operation, 'downscale_ratio': ratio,
+            'strength': self.strength,
+        }
 
 
 def global_feature_distillation(teacher_feature, student_feature):
@@ -152,12 +303,20 @@ def valid_gt_boxes(targets, img_metas):
 
 
 def instance_feature_distillation(teacher_feature, student_feature, pooler,
-                                   targets, img_metas):
+                                   targets, img_metas, mode='cosine'):
     boxes = valid_gt_boxes(targets, img_metas)
     if sum(box.size(0) for box in boxes) == 0:
         return student_feature.sum() * 0.0
     teacher_roi = pooler(teacher_feature.detach(), boxes).flatten(1)
     student_roi = pooler(student_feature, boxes).flatten(1)
-    return (1.0 - F.cosine_similarity(
+    losses = 1.0 - F.cosine_similarity(
         teacher_roi, student_roi, dim=1, eps=1e-8,
-    )).mean()
+    )
+    if mode == 'cosine':
+        return losses.mean()
+    # Frozen-reference ROI activation is a stable source-only proxy for
+    # detection salience; detach prevents weighting from training the teacher.
+    salience = teacher_roi.detach().pow(2).mean(dim=1).sqrt()
+    weights = salience / salience.mean().clamp_min(1e-8)
+    weights = weights.clamp(0.25, 4.0)
+    return (losses * weights).sum() / weights.sum().clamp_min(1e-8)

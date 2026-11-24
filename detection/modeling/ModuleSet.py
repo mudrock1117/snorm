@@ -34,9 +34,12 @@ from detection.modeling.norm.detection_benefit import (
 )
 from detection.modeling.cdfkd import (
     ConservativeSourceDiversification,
+    FeatureResidualAdapter,
+    MultiScaleSpatialEnhancementAdapter,
     SpatialEnhancementAdapter,
     global_feature_distillation,
     instance_feature_distillation,
+    resolve_cdfkd_config,
 )
 #from detection.modeling.norm.R202509x.SNorm_0322_valid_refine_expmamba import SNorm
 
@@ -205,14 +208,24 @@ class ModuleSet(nn.Module):
 
         self.positive_fraction = positive_fraction
         self.cdfkd_adapter = None
+        self.cdfkd_feature_adapter = None
         self.cdfkd_diversification = None
+        self.cdfkd_config = None
         self._cdfkd_identity_checked = False
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD':
-            self.cdfkd_adapter = SpatialEnhancementAdapter(
-                hidden_channels=int(os.environ.get('SNORM_CDFKD_ADAPTER_CHANNELS', '64')),
-                residual_scale=float(os.environ.get('SNORM_CDFKD_RESIDUAL_SCALE', '0.10')),
-            )
-            self.cdfkd_diversification = ConservativeSourceDiversification()
+            self.cdfkd_config = resolve_cdfkd_config()
+            if self.cdfkd_config['rgb_adapter']:
+                cls = (MultiScaleSpatialEnhancementAdapter if
+                       self.cdfkd_config['adapter_type'] == 'multiscale'
+                       else SpatialEnhancementAdapter)
+                self.cdfkd_adapter = cls(self.cdfkd_config['rgb_channels'],
+                    self.cdfkd_config['rgb_residual_scale'])
+            if self.cdfkd_config['feature_adapter']:
+                self.cdfkd_feature_adapter = FeatureResidualAdapter(
+                    1024, self.cdfkd_config['feature_channels'],
+                    self.cdfkd_config['feature_residual_scale'])
+            self.cdfkd_diversification = ConservativeSourceDiversification(
+                self.cdfkd_config['div_strength'])
     
     def prev_norm(self, x):
         
@@ -238,7 +251,7 @@ class ModuleSet(nn.Module):
 
     def forward_cdfkd(self, images, img_metas, targets):
         """Frozen-E2/frozen-detector Stage-A path; only adapter is trainable."""
-        if self.cdfkd_adapter is None or self.cdfkd_diversification is None:
+        if self.cdfkd_config is None or self.cdfkd_diversification is None:
             raise RuntimeError('CDFKD modules require SNORM_EXPERIMENT=CDFKD')
         diversified, diversification_stats = self.cdfkd_diversification(images)
         with torch.no_grad():
@@ -250,7 +263,12 @@ class ModuleSet(nn.Module):
             )
             reference_feature = self.back_norm_w_snorm(reference_image).detach()
 
-        student_image = self.cdfkd_adapter(student_base.detach())
+        student_image = (self.cdfkd_adapter(student_base.detach())
+                         if self.cdfkd_adapter is not None else student_base.detach())
+        student_feature_base = self.back_norm_w_snorm(student_image)
+        student_feature = (self.cdfkd_feature_adapter(student_feature_base)
+                           if self.cdfkd_feature_adapter is not None
+                           else student_feature_base)
         if not self._cdfkd_identity_checked:
             difference = (student_image.detach() - student_base.detach()).abs()
             mean_difference = float(difference.mean().item())
@@ -260,11 +278,13 @@ class ModuleSet(nn.Module):
             ))
             if max_difference > 1e-7:
                 raise RuntimeError('CDFKD adapter is not identity-initialized')
+            if (self.cdfkd_feature_adapter is not None and
+                    (student_feature.detach() - student_feature_base.detach()).abs().max().item() > 1e-7):
+                raise RuntimeError('CDFKD feature adapter is not identity-initialized')
             self._cdfkd_identity_checked = True
 
         # Parameters are frozen, but this forward intentionally keeps autograd
         # so detector and FKD losses reach the spatial adapter input.
-        student_feature = self.back_norm_w_snorm(student_image)
         proposals, rpn_losses, _, _ = self.rpn_norm(
             student_image, student_feature, img_metas, targets
         )
@@ -276,7 +296,7 @@ class ModuleSet(nn.Module):
         )
         loss_instance = instance_feature_distillation(
             reference_feature, student_feature, self.box_head_norm.pooler,
-            targets, img_metas,
+            targets, img_metas, mode=self.cdfkd_config['instance_mode'],
         )
         return {
             'rpn_losses': rpn_losses,
@@ -285,6 +305,7 @@ class ModuleSet(nn.Module):
             'student_feature': student_feature,
             'student_image': student_image,
             'student_base': student_base.detach(),
+            'student_feature_base': student_feature_base,
             'loss_global': loss_global,
             'loss_instance': loss_instance,
             'diversification': diversification_stats,
@@ -400,13 +421,16 @@ class ModuleSet(nn.Module):
             features_norm, feat_dict = self.dist_prog(features_prev.detach(), targets, stride=8, domain=domain, \
             use_dbiase=use_dbiase, moe_mode=moe_mode, moe_mark=moe_mark)
             if (os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD'
-                    and self.cdfkd_adapter is not None):
-                features_norm = self.cdfkd_adapter(features_norm)
+                    and self.cdfkd_config is not None):
+                if self.cdfkd_adapter is not None:
+                    features_norm = self.cdfkd_adapter(features_norm)
             # 保存渲染结果用于评估可视化
             self._last_render_features = features_norm.detach()
             #features_norm = features_prev
             #feat_dict = None
             features_w = self.back_norm_w_snorm(features_norm)
+            if self.cdfkd_feature_adapter is not None:
+                features_w = self.cdfkd_feature_adapter(features_w)
             proposals_w, rpn_losses_w, _, _ = self.rpn_norm(images, features_w, img_metas, targets)
             dets_w, box_losses_w, _, _, _, _, _, obj_dets, _ = self.box_head_norm(features_w, proposals_w, img_metas, targets)
             dets_bb = None

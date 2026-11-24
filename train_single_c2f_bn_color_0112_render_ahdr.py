@@ -194,6 +194,14 @@ def _parameter_grad_norm(parameters):
         squared = value if squared is None else squared + value
     return 0.0 if squared is None else float(squared.sqrt().item())
 
+def _cdfkd_named_adapters(teacher):
+    result = []
+    if getattr(teacher, 'cdfkd_adapter', None) is not None:
+        result.append(('cdfkd_adapter', teacher.cdfkd_adapter))
+    if getattr(teacher, 'cdfkd_feature_adapter', None) is not None:
+        result.append(('cdfkd_feature_adapter', teacher.cdfkd_feature_adapter))
+    return result
+
 def term_sig_hanlder(signum, frame):
     global global_end
     global_end = True
@@ -729,8 +737,8 @@ a3_controller=None):
                         raise RuntimeError(
                             '[CDFKD] detection losses missing: %s' % _missing
                         )
-                    raw_det_loss = sum(loss_dict_cdfkd[key]
-                                       for key in _det_keys)
+                    raw_det_loss = (sum(_cdfkd['rpn_losses'].values())
+                                    + sum(_cdfkd['box_losses'].values()))
                     raw_global_loss = _cdfkd['loss_global']
                     raw_instance_loss = _cdfkd['loss_instance']
                     total_cdfkd_loss = sum(loss_dict_cdfkd.values())
@@ -739,10 +747,12 @@ a3_controller=None):
                     _cdfkd_inner = (model_det.module
                                     if hasattr(model_det, 'module')
                                     else model_det)
-                    _adapter = _cdfkd_inner.teacher.cdfkd_adapter
-                    _adapter_grad = _parameter_grad_norm(
-                        _adapter.parameters()
-                    )
+                    _rgb_adapter = _cdfkd_inner.teacher.cdfkd_adapter
+                    _feature_adapter = _cdfkd_inner.teacher.cdfkd_feature_adapter
+                    _rgb_grad = (_parameter_grad_norm(_rgb_adapter.parameters())
+                                 if _rgb_adapter is not None else 0.0)
+                    _feature_grad = (_parameter_grad_norm(_feature_adapter.parameters())
+                                     if _feature_adapter is not None else 0.0)
                     _render_grad = _parameter_grad_norm(
                         _cdfkd_inner.teacher.proj_norm.render_net.parameters()
                     )
@@ -756,7 +766,7 @@ a3_controller=None):
                             _cdfkd_inner.teacher.box_head_norm.parameters(),
                         )
                     )
-                    if _adapter_grad <= 0.0:
+                    if _rgb_grad + _feature_grad <= 0.0:
                         raise RuntimeError(
                             '[CDFKD] losses produced no adapter gradient'
                         )
@@ -785,11 +795,15 @@ a3_controller=None):
                             )
                         )
                         print(
-                            '[CDFKD GRAD] adapter/render/detector = '
-                            '{:.6e}/{:.6e}/{:.6e}'.format(
-                                _adapter_grad, _render_grad, _detector_grad
+                            '[CDFKD GRAD] rgb/feature/render/detector = '
+                            '{:.6e}/{:.6e}/{:.6e}/{:.6e}'.format(
+                                _rgb_grad, _feature_grad, _render_grad, _detector_grad
                             )
                         )
+                        for _name, _module in _cdfkd_named_adapters(_cdfkd_inner.teacher):
+                            _res = _module.last_residual
+                            print('[CDFKD {} RESIDUAL] mean_abs/max_abs = {:.6e}/{:.6e}'.format(
+                                _name, float(_res.abs().mean().item()), float(_res.abs().max().item())))
                         print('[CDFKD SOURCE]', _cdfkd['diversification'])
                     del total_cdfkd_loss, loss_dict_cdfkd, outputs_cdfkd
                     torch.cuda.empty_cache()
@@ -1349,15 +1363,16 @@ def main(det_cfg, args):
             and os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD'):
         for _pre_cdfkd_parameter in model_det.parameters():
             _pre_cdfkd_parameter.requires_grad_(False)
-        for _pre_cdfkd_parameter in (
-                model_det.teacher.cdfkd_adapter.parameters()):
-            _pre_cdfkd_parameter.requires_grad_(True)
+        for _, _pre_adapter in _cdfkd_named_adapters(model_det.teacher):
+            for _pre_cdfkd_parameter in _pre_adapter.parameters():
+                _pre_cdfkd_parameter.requires_grad_(True)
         _pre_cdfkd_names = [
             name for name, parameter in model_det.named_parameters()
             if parameter.requires_grad
         ]
         if (not _pre_cdfkd_names
-                or any(not name.startswith('teacher.cdfkd_adapter.')
+                or any(not (name.startswith('teacher.cdfkd_adapter.') or
+                            name.startswith('teacher.cdfkd_feature_adapter.'))
                        for name in _pre_cdfkd_names)):
             raise RuntimeError(
                 '[CDFKD PRE-DDP] trainable whitelist failed: %s'
@@ -1673,19 +1688,16 @@ def main(det_cfg, args):
 
             elif _experiment == 'CDFKD':
                 _allowed_missing = {
-                    'teacher.cdfkd_adapter.project_in.weight',
-                    'teacher.cdfkd_adapter.project_in.bias',
-                    'teacher.cdfkd_adapter.spatial.weight',
-                    'teacher.cdfkd_adapter.spatial.bias',
-                    'teacher.cdfkd_adapter.mix.weight',
-                    'teacher.cdfkd_adapter.mix.bias',
-                    'teacher.cdfkd_adapter.project_out.weight',
-                    'teacher.cdfkd_adapter.project_out.bias',
                     'teacher.proj_norm.d4_adapter.0.weight',
                     'teacher.proj_norm.d4_adapter.0.bias',
                     'teacher.proj_norm.d4_adapter.2.weight',
                     'teacher.proj_norm.d4_adapter.2.bias',
                 }
+                for _adapter_name, _adapter_module in _cdfkd_named_adapters(
+                        model_without_ddp.teacher):
+                    _allowed_missing.update(
+                        'teacher.{}.{}'.format(_adapter_name, name)
+                        for name, _ in _adapter_module.named_parameters())
                 _missing = set(_incompatible.missing_keys)
                 _unexpected = set(_incompatible.unexpected_keys)
 
@@ -1958,9 +1970,9 @@ def main(det_cfg, args):
               elif _exp == 'CDFKD':
                   for _parameter in model_without_ddp.parameters():
                       _parameter.requires_grad_(False)
-                  _cdfkd_adapter_parameters = list(
-                      _teacher.cdfkd_adapter.parameters()
-                  )
+                  _cdfkd_adapters = _cdfkd_named_adapters(_teacher)
+                  _cdfkd_adapter_parameters = [p for _, module in _cdfkd_adapters
+                                                for p in module.parameters()]
                   for _parameter in _cdfkd_adapter_parameters:
                       _parameter.requires_grad_(True)
                   _cdfkd_trainable_names = [
@@ -1969,9 +1981,9 @@ def main(det_cfg, args):
                       if parameter.requires_grad
                   ]
                   if (not _cdfkd_trainable_names
-                          or any(not name.startswith(
-                              'teacher.cdfkd_adapter.'
-                          ) for name in _cdfkd_trainable_names)):
+                          or any(not (name.startswith('teacher.cdfkd_adapter.')
+                              or name.startswith('teacher.cdfkd_feature_adapter.'))
+                              for name in _cdfkd_trainable_names)):
                       raise RuntimeError(
                           '[CDFKD] trainable whitelist failed: %s'
                           % _cdfkd_trainable_names
@@ -1996,6 +2008,10 @@ def main(det_cfg, args):
                       '  [CDFKD] E2/render/detector trainable params: 0'
                   )
                   print('  [CDFKD] LR:', _cdfkd_lr)
+                  _cfg = _teacher.cdfkd_config
+                  print('[CDFKD ACCURACY CONFIG]', _cfg)
+                  print('[CDFKD TRAINABLE PARAMS]', [(name, _count(module.parameters()))
+                        for name, module in _cdfkd_adapters])
                   a3_controller = None
 
               elif _exp in ('D1', 'D2', 'D3'):
@@ -2341,8 +2357,8 @@ def main(det_cfg, args):
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
           if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD':
               _cdfkd_allowed_optimizer_ids = set(
-                  id(parameter) for parameter in
-                  model_without_ddp.teacher.cdfkd_adapter.parameters()
+                  id(parameter) for _, module in _cdfkd_named_adapters(
+                      model_without_ddp.teacher) for parameter in module.parameters()
               )
               _cdfkd_optimizer_ids = set(
                   id(parameter)
@@ -2469,6 +2485,16 @@ def main(det_cfg, args):
                                 current_foggy_mAP = v
                             elif 'night' in dataset_name.lower():
                                 current_night_mAP = v
+                if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD':
+                    current_sum = current_foggy_mAP + current_night_mAP
+                    with open(os.path.join(work_dir, 'cdfkd_eval.txt'), 'a',
+                              buffering=1) as _cdfkd_log:
+                        _cdfkd_log.write('step={} fog={:.4f} night={:.4f} sum={:.4f}\n'.format(
+                            global_step, current_foggy_mAP, current_night_mAP, current_sum))
+                        _cdfkd_log.flush()
+                    losses_writer.add_scalar('CDFKD/fog_mAP', current_foggy_mAP, global_step)
+                    losses_writer.add_scalar('CDFKD/night_mAP', current_night_mAP, global_step)
+                    losses_writer.add_scalar('CDFKD/sum_mAP', current_sum, global_step)
                 if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
                     current_sum = current_foggy_mAP + current_night_mAP
                     if current_sum > best_sum_mAP:
@@ -2522,7 +2548,7 @@ def main(det_cfg, args):
  
         #if epoch> 0 and epoch % 4 ==0:
         if (epoch > -1
-                and os.environ.get('SNORM_EXPERIMENT', 'E0') != 'D1'):
+                and os.environ.get('SNORM_EXPERIMENT', 'E0') not in ('D1', 'CDFKD')):
             updated = test_func()
             if updated:
                 save_func('best.pth', 'sum_mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
@@ -2530,7 +2556,7 @@ def main(det_cfg, args):
             
         #if epoch > 10:
         if (epoch > -1
-                and os.environ.get('SNORM_EXPERIMENT', 'E0') != 'D1'):
+                and os.environ.get('SNORM_EXPERIMENT', 'E0') not in ('D1', 'CDFKD')):
             if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'C3V2':
                 save_func('model_epoch_latest.pth')
             else:

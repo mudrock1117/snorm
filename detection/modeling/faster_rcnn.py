@@ -431,11 +431,11 @@ class FasterRCNN(nn.Module):
                     tc_images, img_metas, targets_
                 )
                 for key, value in cdfkd['rpn_losses'].items():
-                    loss_dict.update({key + '_w': value})
+                    loss_dict.update({key + '_w': self.teacher.cdfkd_config['det_weight'] * value})
                 for key, value in cdfkd['box_losses'].items():
-                    loss_dict.update({key + '_w': value})
-                alpha = float(os.environ.get('SNORM_CDFKD_GLOBAL_W', '0.5'))
-                beta = float(os.environ.get('SNORM_CDFKD_INSTANCE_W', '1.0'))
+                    loss_dict.update({key + '_w': self.teacher.cdfkd_config['det_weight'] * value})
+                alpha = self.teacher.cdfkd_config['global_weight']
+                beta = self.teacher.cdfkd_config['instance_weight']
                 if alpha < 0.0 or beta < 0.0:
                     raise ValueError('CDFKD loss weights must be non-negative')
                 loss_dict['cdfkd_global'] = alpha * cdfkd['loss_global']
