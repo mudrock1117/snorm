@@ -1681,6 +1681,10 @@ def main(det_cfg, args):
                     'teacher.cdfkd_adapter.mix.bias',
                     'teacher.cdfkd_adapter.project_out.weight',
                     'teacher.cdfkd_adapter.project_out.bias',
+                    'teacher.proj_norm.d4_adapter.0.weight',
+                    'teacher.proj_norm.d4_adapter.0.bias',
+                    'teacher.proj_norm.d4_adapter.2.weight',
+                    'teacher.proj_norm.d4_adapter.2.bias',
                 }
                 _missing = set(_incompatible.missing_keys)
                 _unexpected = set(_incompatible.unexpected_keys)

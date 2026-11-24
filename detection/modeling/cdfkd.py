@@ -29,7 +29,7 @@ class SpatialEnhancementAdapter(nn.Module):
         residual = F.gelu(self.spatial(residual))
         residual = F.gelu(self.mix(residual))
         residual = self.residual_scale * torch.tanh(self.project_out(residual))
-        return (image + residual).clamp(-1.0, 1.0)
+        return image + residual
 
     def parameter_count(self):
         return sum(parameter.numel() for parameter in self.parameters())
