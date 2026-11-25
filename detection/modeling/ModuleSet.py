@@ -225,8 +225,11 @@ class ModuleSet(nn.Module):
                 self.cdfkd_feature_adapter = FeatureResidualAdapter(
                     1024, self.cdfkd_config['feature_channels'],
                     self.cdfkd_config['feature_residual_scale'])
-            self.cdfkd_diversification = ConservativeSourceDiversification(
-                self.cdfkd_config['div_strength'])
+            if self.cdfkd_config.get('source_diversification', True):
+                self.cdfkd_diversification = ConservativeSourceDiversification(
+                    self.cdfkd_config['div_strength'])
+            else:
+                print('[CDFKD SOURCE] source_diversification=False mode=original_source_only')
     
     def prev_norm(self, x):
         
@@ -252,9 +255,19 @@ class ModuleSet(nn.Module):
 
     def forward_cdfkd(self, images, img_metas, targets):
         """Frozen-E2/frozen-detector Stage-A path; only adapter is trainable."""
-        if self.cdfkd_config is None or self.cdfkd_diversification is None:
+        if self.cdfkd_config is None:
             raise RuntimeError('CDFKD modules require SNORM_EXPERIMENT=CDFKD')
-        diversified, diversification_stats = self.cdfkd_diversification(images)
+        if self.cdfkd_config.get('source_diversification', True):
+            if self.cdfkd_diversification is None:
+                raise RuntimeError('CDFKD source diversification is not initialized')
+            diversified, diversification_stats = self.cdfkd_diversification(images)
+        else:
+            diversified = images
+            diversification_stats = {
+                'operation': 'none',
+                'downscale_ratio': 1.0,
+                'strength': 'original_source_only',
+            }
         with torch.no_grad():
             reference_image, _ = self.dist_prog(
                 images.detach(), targets, stride=8, force_eval_render=True,
