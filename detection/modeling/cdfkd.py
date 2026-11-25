@@ -24,6 +24,12 @@ _PRESETS = {
     'combined': dict(adapter_type='multiscale', rgb_adapter=True,
                      feature_adapter=True, div_strength='medium',
                      global_weight=0.1, instance_weight=0.25),
+    'feature_original_only': dict(
+        adapter_type='basic', rgb_adapter=False, feature_adapter=True,
+        div_strength='conservative', source_diversification=False,
+        global_weight=0.0, instance_weight=0.0, instance_mode='cosine',
+        hard_object=False, hard_object_weight=0.0,
+    ),
     'feature_hard_object': dict(
         adapter_type='basic', rgb_adapter=False, feature_adapter=True,
         div_strength='conservative', global_weight=0.0,
@@ -54,6 +60,7 @@ def resolve_cdfkd_config(environ=None):
         'SNORM_CDFKD_RGB_ADAPTER': ('rgb_adapter', _env_bool),
         'SNORM_CDFKD_FEATURE_ADAPTER': ('feature_adapter', _env_bool),
         'SNORM_CDFKD_DIV_STRENGTH': ('div_strength', str),
+        'SNORM_CDFKD_SOURCE_DIVERSIFICATION': ('source_diversification', _env_bool),
         'SNORM_CDFKD_GLOBAL_W': ('global_weight', float),
         'SNORM_CDFKD_INSTANCE_W': ('instance_weight', float),
         'SNORM_CDFKD_HARD_OBJECT': ('hard_object', _env_bool),
@@ -76,6 +83,7 @@ def resolve_cdfkd_config(environ=None):
         'rgb_channels': int(env.get('SNORM_CDFKD_ADAPTER_CHANNELS', '64')),
         'feature_channels': int(env.get('SNORM_CDFKD_FEATURE_CHANNELS', '32')),
     })
+    config.setdefault('source_diversification', True)
     config.setdefault('hard_object', False)
     config.setdefault('hard_object_weight', 0.0)
     config.setdefault('hard_min_weight', 0.5)
