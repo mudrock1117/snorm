@@ -24,6 +24,12 @@ _PRESETS = {
     'combined': dict(adapter_type='multiscale', rgb_adapter=True,
                      feature_adapter=True, div_strength='medium',
                      global_weight=0.1, instance_weight=0.25),
+    'feature_hard_object': dict(
+        adapter_type='basic', rgb_adapter=False, feature_adapter=True,
+        div_strength='conservative', global_weight=0.0,
+        instance_weight=0.0, instance_mode='cosine', hard_object=True,
+        hard_object_weight=0.1, hard_min_weight=0.5, hard_max_weight=2.0,
+    ),
 }
 
 
@@ -50,6 +56,10 @@ def resolve_cdfkd_config(environ=None):
         'SNORM_CDFKD_DIV_STRENGTH': ('div_strength', str),
         'SNORM_CDFKD_GLOBAL_W': ('global_weight', float),
         'SNORM_CDFKD_INSTANCE_W': ('instance_weight', float),
+        'SNORM_CDFKD_HARD_OBJECT': ('hard_object', _env_bool),
+        'SNORM_CDFKD_HARD_OBJECT_W': ('hard_object_weight', float),
+        'SNORM_CDFKD_HARD_MIN_W': ('hard_min_weight', float),
+        'SNORM_CDFKD_HARD_MAX_W': ('hard_max_weight', float),
     }
     for name, (key, parser) in overrides.items():
         if name in env:
@@ -57,13 +67,19 @@ def resolve_cdfkd_config(environ=None):
     config.update({
         'preset': preset,
         'det_weight': float(env.get('SNORM_CDFKD_DET_W', '1.0')),
-        'instance_mode': env.get('SNORM_CDFKD_INSTANCE_MODE', 'cosine').lower(),
+        'instance_mode': env.get(
+            'SNORM_CDFKD_INSTANCE_MODE',
+            config.get('instance_mode', 'cosine')).lower(),
         'rgb_residual_scale': float(env.get('SNORM_CDFKD_RESIDUAL_SCALE', '0.10')),
         'feature_residual_scale': float(env.get(
             'SNORM_CDFKD_FEATURE_RESIDUAL_SCALE', '0.10')),
         'rgb_channels': int(env.get('SNORM_CDFKD_ADAPTER_CHANNELS', '64')),
         'feature_channels': int(env.get('SNORM_CDFKD_FEATURE_CHANNELS', '32')),
     })
+    config.setdefault('hard_object', False)
+    config.setdefault('hard_object_weight', 0.0)
+    config.setdefault('hard_min_weight', 0.5)
+    config.setdefault('hard_max_weight', 2.0)
     if config['adapter_type'] not in ('basic', 'multiscale'):
         raise ValueError('CDFKD adapter type must be basic or multiscale')
     if config['div_strength'] not in ('conservative', 'medium', 'strong'):
@@ -72,10 +88,55 @@ def resolve_cdfkd_config(environ=None):
         raise ValueError('CDFKD instance mode must be cosine or weighted')
     if not config['rgb_adapter'] and not config['feature_adapter']:
         raise ValueError('CDFKD requires at least one enabled adapter')
-    for key in ('det_weight', 'global_weight', 'instance_weight'):
+    for key in ('det_weight', 'global_weight', 'instance_weight',
+                'hard_object_weight'):
         if config[key] < 0.0:
             raise ValueError('CDFKD %s must be non-negative' % key)
+    if not (0.0 < config['hard_min_weight'] <= config['hard_max_weight']):
+        raise ValueError('CDFKD hard weights require 0 < min <= max')
     return config
+
+
+def hard_positive_detection_loss(class_logits, labels, min_weight=0.5,
+                                 max_weight=2.0):
+    """Reweight positive source GT ROIs by detached classification hardness."""
+    if isinstance(labels, (list, tuple)):
+        labels = torch.cat(labels, dim=0)
+    positive_mask = labels > 0
+    positive_rois = int(positive_mask.sum().item())
+    if positive_rois == 0:
+        zero = class_logits.sum() * 0.0
+        stats = {
+            'positive_rois': 0,
+            'mean_gt_prob': zero.detach(),
+            'mean_hardness': zero.detach(),
+            'weight_mean': zero.detach(),
+            'weight_min': zero.detach(),
+            'weight_max': zero.detach(),
+            'hard_loss': zero.detach(),
+        }
+        return zero, stats
+    positive_logits = class_logits[positive_mask]
+    positive_labels = labels[positive_mask]
+    ce = F.cross_entropy(positive_logits, positive_labels, reduction='none')
+    probs = F.softmax(positive_logits, dim=1)
+    gt_prob = probs.gather(1, positive_labels.unsqueeze(1)).squeeze(1)
+    hardness = -torch.log(gt_prob.clamp_min(1e-8))
+    raw_weight = hardness.detach()
+    weight = raw_weight / raw_weight.mean().clamp_min(1e-8)
+    weight = weight.clamp(min_weight, max_weight)
+    weight = weight / weight.mean().clamp_min(1e-8)
+    hard_loss = (weight * ce).mean()
+    stats = {
+        'positive_rois': positive_rois,
+        'mean_gt_prob': gt_prob.mean().detach(),
+        'mean_hardness': hardness.mean().detach(),
+        'weight_mean': weight.mean().detach(),
+        'weight_min': weight.min().detach(),
+        'weight_max': weight.max().detach(),
+        'hard_loss': hard_loss.detach(),
+    }
+    return hard_loss, stats
 
 
 class SpatialEnhancementAdapter(nn.Module):

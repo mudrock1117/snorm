@@ -440,6 +440,10 @@ class FasterRCNN(nn.Module):
                     raise ValueError('CDFKD loss weights must be non-negative')
                 loss_dict['cdfkd_global'] = alpha * cdfkd['loss_global']
                 loss_dict['cdfkd_instance'] = beta * cdfkd['loss_instance']
+                loss_dict['cdfkd_hard_object'] = (
+                    self.teacher.cdfkd_config['hard_object_weight']
+                    * cdfkd['loss_hard_object']
+                )
                 outputs['cdfkd'] = cdfkd
                 outputs['cdfkd']['alpha'] = alpha
                 outputs['cdfkd']['beta'] = beta

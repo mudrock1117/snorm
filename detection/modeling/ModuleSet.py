@@ -38,6 +38,7 @@ from detection.modeling.cdfkd import (
     MultiScaleSpatialEnhancementAdapter,
     SpatialEnhancementAdapter,
     global_feature_distillation,
+    hard_positive_detection_loss,
     instance_feature_distillation,
     resolve_cdfkd_config,
 )
@@ -288,9 +289,18 @@ class ModuleSet(nn.Module):
         proposals, rpn_losses, _, _ = self.rpn_norm(
             student_image, student_feature, img_metas, targets
         )
-        _, box_losses, _, _, _, _, _, _, _ = self.box_head_norm(
+        _, box_losses, _, _, _, class_logits, labels, _, _ = self.box_head_norm(
             student_feature, proposals, img_metas, targets
         )
+        if self.cdfkd_config['hard_object']:
+            hard_object_loss, hard_object_stats = hard_positive_detection_loss(
+                class_logits, labels,
+                min_weight=self.cdfkd_config['hard_min_weight'],
+                max_weight=self.cdfkd_config['hard_max_weight'],
+            )
+        else:
+            hard_object_loss = student_feature.sum() * 0.0
+            hard_object_stats = None
         loss_global = global_feature_distillation(
             reference_feature, student_feature
         )
@@ -308,6 +318,8 @@ class ModuleSet(nn.Module):
             'student_feature_base': student_feature_base,
             'loss_global': loss_global,
             'loss_instance': loss_instance,
+            'loss_hard_object': hard_object_loss,
+            'hard_object_stats': hard_object_stats,
             'diversification': diversification_stats,
         }
     

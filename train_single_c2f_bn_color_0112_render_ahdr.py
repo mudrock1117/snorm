@@ -741,6 +741,7 @@ a3_controller=None):
                                     + sum(_cdfkd['box_losses'].values()))
                     raw_global_loss = _cdfkd['loss_global']
                     raw_instance_loss = _cdfkd['loss_instance']
+                    raw_hard_loss = _cdfkd['loss_hard_object']
                     total_cdfkd_loss = sum(loss_dict_cdfkd.values())
                     total_cdfkd_loss.backward()
 
@@ -782,18 +783,32 @@ a3_controller=None):
                     metric_logger.update(raw_det_loss=raw_det_loss)
                     metric_logger.update(raw_global_loss=raw_global_loss)
                     metric_logger.update(raw_instance_loss=raw_instance_loss)
+                    metric_logger.update(raw_hard_loss=raw_hard_loss)
                     if (dist_utils.is_main_process()
                             and global_step % max(1, print_freq) == 0):
                         print(
                             '[CDFKD TRAIN] step={} total={:.6f} det={:.6f} '
-                            'global={:.6f} instance={:.6f}'.format(
+                            'global={:.6f} instance={:.6f} hard={:.6f}'.format(
                                 global_step,
                                 float(total_cdfkd_loss.detach().item()),
                                 float(raw_det_loss.detach().item()),
                                 float(raw_global_loss.detach().item()),
                                 float(raw_instance_loss.detach().item()),
+                                float(raw_hard_loss.detach().item()),
                             )
                         )
+                        _hard = _cdfkd['hard_object_stats']
+                        if _hard is not None:
+                            print('[CDFKD HARD] positive_rois={} mean_gt_prob={:.6f} '
+                                  'mean_hardness={:.6f} weight_mean/min/max='
+                                  '{:.6f}/{:.6f}/{:.6f} hard_loss={:.6f}'.format(
+                                      _hard['positive_rois'],
+                                      float(_hard['mean_gt_prob'].item()),
+                                      float(_hard['mean_hardness'].item()),
+                                      float(_hard['weight_mean'].item()),
+                                      float(_hard['weight_min'].item()),
+                                      float(_hard['weight_max'].item()),
+                                      float(_hard['hard_loss'].item())))
                         print(
                             '[CDFKD GRAD] rgb/feature/render/detector = '
                             '{:.6e}/{:.6e}/{:.6e}/{:.6e}'.format(
