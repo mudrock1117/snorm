@@ -338,12 +338,16 @@ class ModuleSet(nn.Module):
         config = self.cdfkd_config
         if self.cdfkd_spectral is None:
             raise RuntimeError('AdvSP spectral module is not initialized')
-        # Frozen rendering is used for the clean path; max-stage rendering
-        # keeps its input graph so factor gradients reach the detection loss.
-        with torch.no_grad():
-            clean_rendered, _ = self.dist_prog(
-                images.detach(), targets, stride=8, force_eval_render=True,
-            )
+        e2_joint = bool(config.get('e2_joint', False))
+        # Stage A keeps the E2 render frozen. In the joint preset, defer both
+        # persistent min-stage renders until after the adversarial max-stage;
+        # otherwise their graphs would overlap the already expensive inner max.
+        clean_rendered = None
+        if not e2_joint:
+            with torch.no_grad():
+                clean_rendered, _ = self.dist_prog(
+                    images.detach(), targets, stride=8, force_eval_render=True,
+                )
         # Do not build the trainable clean detector graph before the adversarial
         # max-stage. Keeping that BS=2 graph alive while differentiating through
         # render+detector causes the >24 GiB peak on RTX 3090. The clean detector
@@ -484,21 +488,35 @@ class ModuleSet(nn.Module):
                 )
             adv_image, delta_values = transform(images.detach())
 
-        # Build the persistent clean training graph only after max-stage
-        # autograd.grad has consumed and released its temporary graph.
-        clean = self._cdfkd_advsp_detect(
-            clean_rendered.detach(), img_metas, targets
-        )
-
-        # Min stage sees a detached adversarial image; only the persistent
-        # feature adapter receives gradients from the second detector pass.
-        with torch.no_grad():
+        # Build persistent min-stage graphs only after max-stage autograd.grad
+        # has released its temporary graph. Legacy torch checkpoint is safe here
+        # because the outer training step uses loss.backward(), not autograd.grad.
+        if e2_joint:
+            clean_rendered, _ = self.dist_prog(
+                images.detach(), targets, stride=8, force_eval_render=True,
+                d1_det_checkpoint=True,
+            )
+            clean = self._cdfkd_advsp_detect(
+                clean_rendered, img_metas, targets
+            )
             adv_rendered, _ = self.dist_prog(
                 adv_image.detach(), targets, stride=8, force_eval_render=True,
+                d1_det_checkpoint=True,
             )
-        adversarial = self._cdfkd_advsp_detect(
-            adv_rendered.detach(), img_metas, targets
-        )
+            adversarial = self._cdfkd_advsp_detect(
+                adv_rendered, img_metas, targets
+            )
+        else:
+            clean = self._cdfkd_advsp_detect(
+                clean_rendered.detach(), img_metas, targets
+            )
+            with torch.no_grad():
+                adv_rendered, _ = self.dist_prog(
+                    adv_image.detach(), targets, stride=8, force_eval_render=True,
+                )
+            adversarial = self._cdfkd_advsp_detect(
+                adv_rendered.detach(), img_metas, targets
+            )
         mu = config['advsp_mu']
         advsp_diagnostics = {
             'factors': factor_diagnostics,
@@ -524,6 +542,7 @@ class ModuleSet(nn.Module):
             'student_feature': clean[1],
             'student_image': clean[0],
             'student_base': clean_rendered.detach(),
+            'e2_joint': e2_joint,
             'student_feature_base': clean[1],
             'loss_global': zero,
             'loss_instance': zero,
