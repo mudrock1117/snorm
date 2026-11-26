@@ -1560,6 +1560,11 @@ def main(det_cfg, args):
         if os.environ.get('SNORM_EXPERIMENT', 'E0') in ('D1', 'D2', 'D3'):
             model_det._set_static_graph()
             print('[D1/D2] DDP static graph enabled for reentrant AHDR checkpointing')
+        elif (os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD'
+              and bool(model_det.module.teacher.cdfkd_config.get(
+                  'e2_joint', False))):
+            model_det._set_static_graph()
+            print('[CDFKD JOINT] DDP static graph enabled for E2 AHDR checkpointing')
        
         torch.autograd.set_detect_anomaly(True)
         torch.distributed.barrier()
