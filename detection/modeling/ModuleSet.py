@@ -492,17 +492,35 @@ class ModuleSet(nn.Module):
         # has released its temporary graph. Legacy torch checkpoint is safe here
         # because the outer training step uses loss.backward(), not autograd.grad.
         if e2_joint:
-            clean_rendered, _ = self.dist_prog(
-                images.detach(), targets, stride=8, force_eval_render=True,
-                cdfkd_joint_checkpoint=True,
+            # AHDR backward recomputation at full local BS=2 exceeds 24GB even
+            # with activation offload because the window-attention forward
+            # working set itself peaks too high. Render the trainable E2 branch
+            # per sample, then restore the original BS before detection. This
+            # preserves the detector's BS=2 sampling/loss semantics and the
+            # single clean + mu * adversarial optimizer step.
+            joint_microbatch = max(
+                1, int(os.environ.get('SNORM_CDFKD_E2_MICROBATCH', '1'))
             )
+
+            def _joint_render_microbatched(source):
+                rendered_parts = []
+                for start in range(0, source.size(0), joint_microbatch):
+                    end = min(source.size(0), start + joint_microbatch)
+                    rendered_part, _ = self.dist_prog(
+                        source[start:end].detach(),
+                        targets[start:end],
+                        stride=8,
+                        force_eval_render=True,
+                        cdfkd_joint_checkpoint=True,
+                    )
+                    rendered_parts.append(rendered_part)
+                return torch.cat(rendered_parts, dim=0)
+
+            clean_rendered = _joint_render_microbatched(images)
             clean = self._cdfkd_advsp_detect(
                 clean_rendered, img_metas, targets
             )
-            adv_rendered, _ = self.dist_prog(
-                adv_image.detach(), targets, stride=8, force_eval_render=True,
-                cdfkd_joint_checkpoint=True,
-            )
+            adv_rendered = _joint_render_microbatched(adv_image)
             adversarial = self._cdfkd_advsp_detect(
                 adv_rendered, img_metas, targets
             )
