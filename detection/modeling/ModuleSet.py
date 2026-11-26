@@ -494,14 +494,14 @@ class ModuleSet(nn.Module):
         if e2_joint:
             clean_rendered, _ = self.dist_prog(
                 images.detach(), targets, stride=8, force_eval_render=True,
-                d1_det_checkpoint=True,
+                cdfkd_joint_checkpoint=True,
             )
             clean = self._cdfkd_advsp_detect(
                 clean_rendered, img_metas, targets
             )
             adv_rendered, _ = self.dist_prog(
                 adv_image.detach(), targets, stride=8, force_eval_render=True,
-                d1_det_checkpoint=True,
+                cdfkd_joint_checkpoint=True,
             )
             adversarial = self._cdfkd_advsp_detect(
                 adv_rendered, img_metas, targets
@@ -1108,7 +1108,7 @@ class ModuleSet(nn.Module):
             
         return outputs
     
-    def dist_prog(self, x, targets, stride=8, use_dbiase=False, domain='source', use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=0, force_eval_render=False, d1_det_checkpoint=False):
+    def dist_prog(self, x, targets, stride=8, use_dbiase=False, domain='source', use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=0, force_eval_render=False, d1_det_checkpoint=False, cdfkd_joint_checkpoint=False):
         if self.cfg.MODEL.MODE.PJOTYPE == 'BN':
             _empty = {
                 'feature_dict': [],
@@ -1138,6 +1138,7 @@ class ModuleSet(nn.Module):
                     )
                 ),
                 d1_det_checkpoint=d1_det_checkpoint,
+                cdfkd_joint_checkpoint=cdfkd_joint_checkpoint,
             )
             if self.detection_benefit_enabled:
                 required = ('selective_base', 'selective_legacy')
