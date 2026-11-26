@@ -771,7 +771,22 @@ a3_controller=None):
                         raise RuntimeError(
                             '[CDFKD] losses produced no adapter gradient'
                         )
-                    if _render_grad != 0.0 or _detector_grad != 0.0:
+                    _cdfkd_joint = bool(
+                        _cdfkd_inner.teacher.cdfkd_config.get(
+                            'e2_joint', False
+                        )
+                    )
+                    if _cdfkd_joint:
+                        if _render_grad <= 0.0:
+                            raise RuntimeError(
+                                '[CDFKD JOINT] E2 render received no gradient'
+                            )
+                        if _detector_grad != 0.0:
+                            raise RuntimeError(
+                                '[CDFKD JOINT] frozen detector received '
+                                'gradient: {:.6e}'.format(_detector_grad)
+                            )
+                    elif _render_grad != 0.0 or _detector_grad != 0.0:
                         raise RuntimeError(
                             '[CDFKD] frozen E2/detector received gradients: '
                             'render={:.6e}, detector={:.6e}'.format(
