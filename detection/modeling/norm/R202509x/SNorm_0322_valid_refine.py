@@ -66,6 +66,91 @@ class _AdvSPRenderRecompute(torch.autograd.Function):
         return grads + (None,)
 
 
+class _CDFKDJointRenderRecompute(torch.autograd.Function):
+    """Checkpoint trainable AHDR and return gradients for its parameters.
+
+    The legacy checkpoint path recomputes AHDR during backward but keeps all
+    recomputed activations on GPU. On 24GB cards that overlaps with the
+    detector backward state and OOMs. This custom Function recomputes AHDR
+    under saved_tensors_hooks so tensors saved by the recomputation live on
+    CPU until autograd needs them. AHDR parameters are explicit Tensor inputs,
+    therefore their gradients are returned to the outer backward normally.
+    """
+    @staticmethod
+    def forward(ctx, x0, x1, x2, render_net, *params):
+        ctx.render_net = render_net
+        ctx.params = params
+        ctx.save_for_backward(x0, x1, x2)
+        with torch.no_grad():
+            result = render_net(x0, x1, x2)
+            return extract_ahdr_render_tensor(result)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        saved = ctx.saved_tensors
+        input_needs = ctx.needs_input_grad[:3]
+        param_needs = ctx.needs_input_grad[4:]
+        graph = getattr(torch.autograd, 'graph', None)
+        hooks = getattr(graph, 'saved_tensors_hooks', None) if graph is not None else None
+
+        def pack(tensor):
+            if not tensor.is_cuda:
+                return (None, tensor)
+            return (tensor.device, tensor.detach().cpu())
+
+        def unpack(packed):
+            device, tensor = packed
+            if device is None:
+                return tensor
+            return tensor.to(device=device)
+
+        class _NoopHooks(object):
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+        hook_ctx = hooks(pack, unpack) if hooks is not None else _NoopHooks()
+        with torch.enable_grad():
+            inputs = tuple(
+                tensor.detach().requires_grad_(need)
+                for tensor, need in zip(saved, input_needs)
+            )
+            with hook_ctx:
+                result = ctx.render_net(*inputs)
+                output = extract_ahdr_render_tensor(result)
+
+            active = []
+            active_slots = []
+            for index, (tensor, need) in enumerate(zip(inputs, input_needs)):
+                if need:
+                    active.append(tensor)
+                    active_slots.append(('input', index))
+            for index, (param, need) in enumerate(zip(ctx.params, param_needs)):
+                if need:
+                    active.append(param)
+                    active_slots.append(('param', index))
+
+            if active:
+                grads_active = torch.autograd.grad(
+                    output, active, grad_output,
+                    retain_graph=False, create_graph=False,
+                    allow_unused=True,
+                )
+            else:
+                grads_active = ()
+
+        input_grads = [None, None, None]
+        param_grads = [None] * len(ctx.params)
+        for slot, grad in zip(active_slots, grads_active):
+            kind, index = slot
+            if kind == 'input':
+                input_grads[index] = grad
+            else:
+                param_grads[index] = grad
+        return tuple(input_grads) + (None,) + tuple(param_grads)
+
+
 class SNorm(nn.Module):
     """
     0318-op 版本：
@@ -920,21 +1005,13 @@ class SNorm(nn.Module):
         explicitly without changing render_net mode or return values.
         """
         if getattr(self, '_cdfkd_joint_checkpoint_active', False):
-            # Joint min-stage is consumed by the ordinary outer loss.backward().
-            # Legacy reentrant checkpoint therefore remains valid here and,
-            # unlike _AdvSPRenderRecompute, recomputes render_net under autograd
-            # so gradients accumulate into AHDR parameters as well as inputs.
-            def _joint_render(a, b, c):
-                return extract_ahdr_render_tensor(
-                    self.render_net(a, b, c)
-                )
-            # Legacy reentrant checkpoint only builds a backward graph when at
-            # least one explicit input requires grad. Upstream E2 preprocessing
-            # is intentionally frozen, so create a local anchor if necessary.
-            # It is not an optimizer parameter and its gradient is discarded.
-            if not (x0.requires_grad or x1.requires_grad or x2.requires_grad):
-                x1 = x1.detach().requires_grad_(True)
-            return checkpoint(_joint_render, x0, x1, x2)
+            trainable_params = tuple(
+                param for param in self.render_net.parameters()
+                if param.requires_grad
+            )
+            return _CDFKDJointRenderRecompute.apply(
+                x0, x1, x2, self.render_net, *trainable_params
+            )
 
         if getattr(self, '_d1_det_checkpoint_active', False):
             # AdvSP max-stage uses outer autograd.grad on spectral factors.
