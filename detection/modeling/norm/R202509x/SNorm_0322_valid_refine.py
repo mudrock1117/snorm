@@ -23,6 +23,49 @@ from diagnostics.detection_analysis import boxes_to_masks
 from torchvision import transforms as v2
 import matplotlib.pyplot as plt
 
+class _AdvSPRenderRecompute(torch.autograd.Function):
+    """Checkpoint frozen AHDR while remaining compatible with autograd.grad.
+
+    Unlike torch.utils.checkpoint in the legacy PyTorch used by this project,
+    this Function supports an outer torch.autograd.grad call. AHDR parameters
+    are frozen in the AdvSP max-stage, so only gradients for x0/x1/x2 are
+    recomputed and returned.
+    """
+    @staticmethod
+    def forward(ctx, x0, x1, x2, render_net):
+        ctx.render_net = render_net
+        ctx.save_for_backward(x0, x1, x2)
+        with torch.no_grad():
+            result = render_net(x0, x1, x2)
+            return extract_ahdr_render_tensor(result)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        saved = ctx.saved_tensors
+        needs = ctx.needs_input_grad[:3]
+        with torch.enable_grad():
+            inputs = tuple(
+                tensor.detach().requires_grad_(need)
+                for tensor, need in zip(saved, needs)
+            )
+            result = ctx.render_net(*inputs)
+            output = extract_ahdr_render_tensor(result)
+            active = [tensor for tensor, need in zip(inputs, needs) if need]
+            if active:
+                grads_active = torch.autograd.grad(
+                    output, active, grad_output,
+                    retain_graph=False, create_graph=False,
+                    allow_unused=True,
+                )
+            else:
+                grads_active = ()
+        grad_iter = iter(grads_active)
+        grads = tuple(
+            next(grad_iter) if need else None for need in needs
+        )
+        return grads + (None,)
+
+
 class SNorm(nn.Module):
     """
     0318-op 版本：
@@ -876,15 +919,9 @@ class SNorm(nn.Module):
         explicitly without changing render_net mode or return values.
         """
         if getattr(self, '_d1_det_checkpoint_active', False):
-            dummy = torch.zeros(1, device=x1.device, dtype=x1.dtype, requires_grad=True)
-
-            def _render_with_dummy(a, b, c, _dummy):
-                result = self.render_net(a, b, c)
-                tensor = extract_ahdr_render_tensor(result)
-                return tensor + _dummy.view(1, 1, 1, 1) * 0.0
-
-            result = checkpoint(_render_with_dummy, x0, x1, x2, dummy)
-            return result
+            return _AdvSPRenderRecompute.apply(
+                x0, x1, x2, self.render_net
+            )
 
         result = self.render_net(x0, x1, x2)
         return extract_ahdr_render_tensor(result)
