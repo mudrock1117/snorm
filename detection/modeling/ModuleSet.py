@@ -18,6 +18,7 @@ from .rpn import RPN
 import cv2
 import math
 import copy
+from contextlib import contextmanager
 
 #from detection.modeling.contrastive.GraphContrast import GraphContrastive
 from detection.modeling.discriminator.InDiscriminator import InstanceDiscriminator
@@ -47,6 +48,31 @@ from detection.modeling.advsp import (
     update_spectral_factors, fft_backend_name, _tensor_abs_stats,
 )
 #from detection.modeling.norm.R202509x.SNorm_0322_valid_refine_expmamba import SNorm
+
+
+
+@contextmanager
+def _advsp_saved_tensor_offload(enabled):
+    """Offload max-stage saved activations to CPU without breaking input grads."""
+    graph = getattr(torch.autograd, 'graph', None)
+    hooks = getattr(graph, 'saved_tensors_hooks', None) if graph is not None else None
+    if not enabled or hooks is None:
+        yield
+        return
+
+    def pack(tensor):
+        if not tensor.is_cuda:
+            return (None, tensor)
+        return (tensor.device, tensor.detach().cpu())
+
+    def unpack(packed):
+        device, tensor = packed
+        if device is None:
+            return tensor
+        return tensor.to(device=device)
+
+    with hooks(pack, unpack):
+        yield
 
 #
 from torch.utils.tensorboard import SummaryWriter
@@ -362,19 +388,27 @@ class ModuleSet(nn.Module):
                 spectral, delta_values = transform(images.detach())
                 # The renderer and detector are frozen, not graph-disabled:
                 # autograd.grad must reach only ephemeral spectral factors.
-                adversarial_rendered, _ = self.dist_prog(
-                    spectral, targets, stride=8, force_eval_render=True,
-                )
-                adv_result = self._cdfkd_advsp_detect(
-                    adversarial_rendered, img_metas, targets
-                )
-                active_factors = [factor for factor in factors if factor is not None]
-                if not active_factors:
-                    break
-                gradients = torch.autograd.grad(
-                    self._cdfkd_advsp_det_loss(adv_result), active_factors,
-                    allow_unused=True,
-                )
+                # Max-stage needs input gradients all the way back to alpha/beta/gamma,
+                # but it does not need to keep those saved activations resident on GPU.
+                # CPU saved-tensor offload preserves the exact forward computation and
+                # autograd path while reducing the >24 GiB peak seen with BS=2 at 640.
+                offload_max_graph = os.environ.get(
+                    'SNORM_ADVSP_CPU_OFFLOAD', '1'
+                ) != '0'
+                with _advsp_saved_tensor_offload(offload_max_graph):
+                    adversarial_rendered, _ = self.dist_prog(
+                        spectral, targets, stride=8, force_eval_render=True,
+                    )
+                    adv_result = self._cdfkd_advsp_detect(
+                        adversarial_rendered, img_metas, targets
+                    )
+                    active_factors = [factor for factor in factors if factor is not None]
+                    if not active_factors:
+                        break
+                    gradients = torch.autograd.grad(
+                        self._cdfkd_advsp_det_loss(adv_result), active_factors,
+                        allow_unused=True,
+                    )
                 grad_iter = iter(gradients)
                 expanded = tuple(None if factor is None else next(grad_iter)
                                  for factor in factors)
