@@ -43,6 +43,22 @@ class AdvSPSpectralTest(unittest.TestCase):
         self.assertTrue(torch.equal(deltas, reused))
         self.assertTrue(torch.allclose(first, second, atol=1e-5, rtol=1e-5))
 
+    def test_non_square_valid_extent_uses_height_width_order(self):
+        # Project metadata (W,H)=(11,6) is converted at the ModuleSet boundary
+        # before reaching AdvSP; AdvSP itself must consume (H,W)=(6,11).
+        images = torch.randn(1, 3, 8, 12)
+        module = SpectralPerturbationModule(
+            csg=False, tsg=False, scg=False,
+            delta_min=0.0, delta_max=0.01,
+        )
+        output, _ = module(
+            images, image_sizes=[(6, 11)], return_deltas=True,
+        )
+        self.assertEqual(tuple(output.shape), tuple(images.shape))
+        self.assertTrue(torch.allclose(output[:, :, :6, :11],
+                                       images[:, :, :6, :11],
+                                       atol=1e-5, rtol=1e-5))
+
     def test_legacy_onesided_reconstruction_shape(self):
         height, width = 7, 10
         image = torch.randn(3, height, width)
