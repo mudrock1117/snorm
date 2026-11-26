@@ -426,6 +426,7 @@ class ModuleSet(nn.Module):
                         adversarial_rendered, _ = self.dist_prog(
                             spectral, mb_targets, stride=8,
                             force_eval_render=True,
+                            d1_det_checkpoint=True,
                         )
                         adv_result = self._cdfkd_advsp_detect(
                             adversarial_rendered, mb_metas, mb_targets
