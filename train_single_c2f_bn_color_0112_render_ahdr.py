@@ -1424,24 +1424,42 @@ def main(det_cfg, args):
 
     if (args.distributed
             and os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD'):
+        _pre_cdfkd_joint = bool(
+            getattr(model_det.teacher, 'cdfkd_config', {}).get(
+                'e2_joint', False
+            )
+        )
         for _pre_cdfkd_parameter in model_det.parameters():
             _pre_cdfkd_parameter.requires_grad_(False)
         for _, _pre_adapter in _cdfkd_named_adapters(model_det.teacher):
             for _pre_cdfkd_parameter in _pre_adapter.parameters():
                 _pre_cdfkd_parameter.requires_grad_(True)
+        if _pre_cdfkd_joint:
+            for _pre_cdfkd_parameter in (
+                    model_det.teacher.proj_norm.render_net.parameters()):
+                _pre_cdfkd_parameter.requires_grad_(True)
         _pre_cdfkd_names = [
             name for name, parameter in model_det.named_parameters()
             if parameter.requires_grad
         ]
+        _pre_allowed = (
+            'teacher.cdfkd_adapter.',
+            'teacher.cdfkd_feature_adapter.',
+        )
+        if _pre_cdfkd_joint:
+            _pre_allowed = _pre_allowed + ('teacher.proj_norm.render_net.',)
         if (not _pre_cdfkd_names
-                or any(not (name.startswith('teacher.cdfkd_adapter.') or
-                            name.startswith('teacher.cdfkd_feature_adapter.'))
+                or any(not name.startswith(_pre_allowed)
                        for name in _pre_cdfkd_names)):
             raise RuntimeError(
                 '[CDFKD PRE-DDP] trainable whitelist failed: %s'
                 % _pre_cdfkd_names
             )
-        print('[CDFKD PRE-DDP] adapter-only requires_grad policy applied')
+        print(
+            '[CDFKD PRE-DDP] {} requires_grad policy applied'.format(
+                'E2-render+adapter' if _pre_cdfkd_joint else 'adapter-only'
+            )
+        )
 
     # D1 has a stricter whitelist than every detector-training experiment.
     # Apply it before DDP constructs reducer hooks; optimizer setup below
@@ -2048,26 +2066,47 @@ def main(det_cfg, args):
 
 
               elif _exp == 'CDFKD':
+                  _cfg = _teacher.cdfkd_config
+                  _cdfkd_joint = bool(_cfg.get('e2_joint', False))
                   for _parameter in model_without_ddp.parameters():
                       _parameter.requires_grad_(False)
                   _cdfkd_adapters = _cdfkd_named_adapters(_teacher)
-                  _cdfkd_adapter_parameters = [p for _, module in _cdfkd_adapters
-                                                for p in module.parameters()]
+                  _cdfkd_adapter_parameters = [
+                      p for _, module in _cdfkd_adapters
+                      for p in module.parameters()
+                  ]
                   for _parameter in _cdfkd_adapter_parameters:
                       _parameter.requires_grad_(True)
+
+                  _e2_render_parameters = []
+                  if _cdfkd_joint:
+                      _e2_render_parameters = list(
+                          _teacher.proj_norm.render_net.parameters()
+                      )
+                      for _parameter in _e2_render_parameters:
+                          _parameter.requires_grad_(True)
+
                   _cdfkd_trainable_names = [
                       name for name, parameter in
                       model_without_ddp.named_parameters()
                       if parameter.requires_grad
                   ]
+                  _allowed = (
+                      'teacher.cdfkd_adapter.',
+                      'teacher.cdfkd_feature_adapter.',
+                  )
+                  if _cdfkd_joint:
+                      _allowed = _allowed + (
+                          'teacher.proj_norm.render_net.',
+                      )
                   if (not _cdfkd_trainable_names
-                          or any(not (name.startswith('teacher.cdfkd_adapter.')
-                              or name.startswith('teacher.cdfkd_feature_adapter.'))
-                              for name in _cdfkd_trainable_names)):
+                          or any(not name.startswith(_allowed)
+                                 for name in _cdfkd_trainable_names)):
                       raise RuntimeError(
                           '[CDFKD] trainable whitelist failed: %s'
                           % _cdfkd_trainable_names
                       )
+
                   _cdfkd_count = _count(_cdfkd_adapter_parameters)
                   if _cdfkd_count <= 0:
                       raise RuntimeError('[CDFKD] adapter has no parameters')
@@ -2081,17 +2120,46 @@ def main(det_cfg, args):
                       'lr': _cdfkd_lr,
                       'name': 'cdfkd_spatial_adapter',
                   }]
+
+                  _e2_count = _count(_e2_render_parameters)
+                  if _cdfkd_joint:
+                      _e2_lr = float(os.environ.get(
+                          'SNORM_CDFKD_E2_LR', '1e-5'
+                      ))
+                      if _e2_lr <= 0.0:
+                          raise RuntimeError(
+                              '[CDFKD] E2 joint LR must be positive'
+                          )
+                      if _e2_count <= 0:
+                          raise RuntimeError(
+                              '[CDFKD] E2 render_net has no parameters'
+                          )
+                      model_paramters += [{
+                          'params': _e2_render_parameters,
+                          'lr': _e2_lr,
+                          'name': 'cdfkd_e2_render',
+                      }]
+                  else:
+                      _e2_lr = 0.0
+
                   print(
                       '  [CDFKD] Spatial Adapter trainable params:',
-                      _cdfkd_count )
-                  print(
-                      '  [CDFKD] E2/render/detector trainable params: 0'
+                      _cdfkd_count
                   )
-                  print('  [CDFKD] LR:', _cdfkd_lr)
-                  _cfg = _teacher.cdfkd_config
+                  print(
+                      '  [CDFKD] E2 render trainable params:', _e2_count
+                  )
+                  print(
+                      '  [CDFKD] detector trainable params: 0'
+                  )
+                  print('  [CDFKD] Adapter LR:', _cdfkd_lr)
+                  print('  [CDFKD] E2 LR:', _e2_lr)
                   print('[CDFKD ACCURACY CONFIG]', _cfg)
-                  print('[CDFKD TRAINABLE PARAMS]', [(name, _count(module.parameters()))
-                        for name, module in _cdfkd_adapters])
+                  print(
+                      '[CDFKD TRAINABLE PARAMS]',
+                      [(name, _count(module.parameters()))
+                       for name, module in _cdfkd_adapters]
+                  )
                   a3_controller = None
 
               elif _exp in ('D1', 'D2', 'D3'):
