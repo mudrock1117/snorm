@@ -61,6 +61,7 @@ _PRESETS = {
 for _advsp_name, _advsp_mode in {
     'feature_spm_random': dict(random_only=True, csg=True, tsg=True, scg=True, object_protect=False),
     'feature_advsp': dict(random_only=False, csg=True, tsg=True, scg=True, object_protect=False),
+    'feature_advsp_e2_joint': dict(random_only=False, csg=True, tsg=True, scg=True, object_protect=False, e2_joint=True),
     'feature_advsp_no_phase': dict(random_only=False, csg=True, tsg=True, scg=False, object_protect=False),
     'feature_advsp_color': dict(random_only=False, csg=True, tsg=False, scg=False, object_protect=False),
     'feature_advsp_texture': dict(random_only=False, csg=False, tsg=True, scg=False, object_protect=False),
@@ -75,6 +76,7 @@ for _advsp_name, _advsp_mode in {
         advsp_csg=_advsp_mode['csg'], advsp_tsg=_advsp_mode['tsg'],
         advsp_scg=_advsp_mode['scg'],
         advsp_object_protect=_advsp_mode['object_protect'],
+        e2_joint=bool(_advsp_mode.get('e2_joint', False)),
     )
 
 def _env_bool(value):
@@ -111,6 +113,7 @@ def resolve_cdfkd_config(environ=None):
         'SNORM_ADVSP_SCG': ('advsp_scg', _env_bool),
         'SNORM_ADVSP_OBJECT_PROTECT': ('advsp_object_protect', _env_bool),
         'SNORM_ADVSP_RANDOM_ONLY': ('advsp_random_only', _env_bool),
+        'SNORM_CDFKD_E2_JOINT': ('e2_joint', _env_bool),
     }
     for name, (key, parser) in overrides.items():
         if name in env:
@@ -153,6 +156,7 @@ def resolve_cdfkd_config(environ=None):
         if not (0.0 <= config['advsp_delta_min'] <= config['advsp_delta_max'] <= 0.5):
             raise ValueError('AdvSP delta range must satisfy 0 <= min <= max <= 0.5')
     config.setdefault('source_diversification', True)
+    config.setdefault('e2_joint', False)
     config.setdefault('hard_object', False)
     config.setdefault('hard_object_weight', 0.0)
     config.setdefault('hard_min_weight', 0.5)
