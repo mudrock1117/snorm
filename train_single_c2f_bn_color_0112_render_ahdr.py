@@ -1778,7 +1778,8 @@ def main(det_cfg, args):
         # Isolate CDFKD presets so checkpoints and evaluation logs do not mix.
         if _exp_wd == 'CDFKD':
             _cdfkd_preset_wd = os.environ.get(
-                'SNORM_CDFKD_PRESET', 'baseline'
+                'SNORM_ADVSP_PRESET',
+                os.environ.get('SNORM_CDFKD_PRESET', 'baseline')
             ).strip().lower()
             work_dir = os.path.join(work_dir, _cdfkd_preset_wd)
             print(

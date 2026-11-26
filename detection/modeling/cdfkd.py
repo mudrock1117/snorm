@@ -57,6 +57,26 @@ _PRESETS = {
 }
 
 
+
+for _advsp_name, _advsp_mode in {
+    'feature_spm_random': dict(random_only=True, csg=True, tsg=True, scg=True, object_protect=False),
+    'feature_advsp': dict(random_only=False, csg=True, tsg=True, scg=True, object_protect=False),
+    'feature_advsp_no_phase': dict(random_only=False, csg=True, tsg=True, scg=False, object_protect=False),
+    'feature_advsp_color': dict(random_only=False, csg=True, tsg=False, scg=False, object_protect=False),
+    'feature_advsp_texture': dict(random_only=False, csg=False, tsg=True, scg=False, object_protect=False),
+    'feature_advsp_object_protect': dict(random_only=False, csg=True, tsg=True, scg=True, object_protect=True),
+}.items():
+    _PRESETS[_advsp_name] = dict(
+        adapter_type='basic', rgb_adapter=False, feature_adapter=True,
+        div_strength='conservative', source_diversification=False,
+        global_weight=0.0, instance_weight=0.0, instance_mode='cosine',
+        hard_object=False, hard_object_weight=0.0, advsp=True,
+        advsp_random_only=_advsp_mode['random_only'],
+        advsp_csg=_advsp_mode['csg'], advsp_tsg=_advsp_mode['tsg'],
+        advsp_scg=_advsp_mode['scg'],
+        advsp_object_protect=_advsp_mode['object_protect'],
+    )
+
 def _env_bool(value):
     return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
 
@@ -64,7 +84,7 @@ def _env_bool(value):
 def resolve_cdfkd_config(environ=None):
     """Resolve presets first, then explicit environment overrides."""
     env = os.environ if environ is None else environ
-    preset = env.get('SNORM_CDFKD_PRESET', 'baseline').strip().lower()
+    preset = env.get('SNORM_ADVSP_PRESET', env.get('SNORM_CDFKD_PRESET', 'baseline')).strip().lower()
     if preset not in _PRESETS:
         raise ValueError('Unknown SNORM_CDFKD_PRESET: %s' % preset)
     config = dict(_PRESETS[preset])
@@ -85,6 +105,12 @@ def resolve_cdfkd_config(environ=None):
         'SNORM_CDFKD_HARD_OBJECT_W': ('hard_object_weight', float),
         'SNORM_CDFKD_HARD_MIN_W': ('hard_min_weight', float),
         'SNORM_CDFKD_HARD_MAX_W': ('hard_max_weight', float),
+
+        'SNORM_ADVSP_CSG': ('advsp_csg', _env_bool),
+        'SNORM_ADVSP_TSG': ('advsp_tsg', _env_bool),
+        'SNORM_ADVSP_SCG': ('advsp_scg', _env_bool),
+        'SNORM_ADVSP_OBJECT_PROTECT': ('advsp_object_protect', _env_bool),
+        'SNORM_ADVSP_RANDOM_ONLY': ('advsp_random_only', _env_bool),
     }
     for name, (key, parser) in overrides.items():
         if name in env:
@@ -101,6 +127,27 @@ def resolve_cdfkd_config(environ=None):
         'rgb_channels': int(env.get('SNORM_CDFKD_ADAPTER_CHANNELS', '64')),
         'feature_channels': int(env.get('SNORM_CDFKD_FEATURE_CHANNELS', '32')),
     })
+
+    config.update({
+        'advsp': bool(config.get('advsp', False)),
+        'advsp_mu': float(env.get('SNORM_ADVSP_MU', '1.0')),
+        'advsp_radius': float(env.get('SNORM_ADVSP_R', '0.5')),
+        'advsp_steps': int(env.get('SNORM_ADVSP_STEPS', '1')),
+        'advsp_tau': float(env.get('SNORM_ADVSP_TAU', '0.05')),
+        'advsp_lambda': float(env.get('SNORM_ADVSP_LAMBDA', '0.0')),
+        'advsp_object_rho': float(env.get('SNORM_ADVSP_OBJECT_RHO', '0.5')),
+    })
+    if config['advsp']:
+        config.update({
+            'rgb_adapter': False, 'feature_adapter': True,
+            'source_diversification': False,
+            'global_weight': 0.0, 'instance_weight': 0.0,
+            'hard_object': False, 'hard_object_weight': 0.0,
+        })
+        if config['advsp_radius'] <= 0.0 or config['advsp_steps'] < 1:
+            raise ValueError('AdvSP requires R > 0 and STEPS >= 1')
+        if config['advsp_tau'] <= 0.0 or config['advsp_mu'] < 0.0:
+            raise ValueError('AdvSP tau must be positive and mu non-negative')
     config.setdefault('source_diversification', True)
     config.setdefault('hard_object', False)
     config.setdefault('hard_object_weight', 0.0)

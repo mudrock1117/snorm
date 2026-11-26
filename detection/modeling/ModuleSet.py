@@ -42,6 +42,10 @@ from detection.modeling.cdfkd import (
     instance_feature_distillation,
     resolve_cdfkd_config,
 )
+from detection.modeling.advsp import (
+    SpectralPerturbationModule, make_spectral_factors,
+    update_spectral_factors,
+)
 #from detection.modeling.norm.R202509x.SNorm_0322_valid_refine_expmamba import SNorm
 
 #
@@ -211,6 +215,7 @@ class ModuleSet(nn.Module):
         self.cdfkd_adapter = None
         self.cdfkd_feature_adapter = None
         self.cdfkd_diversification = None
+        self.cdfkd_spectral = None
         self.cdfkd_config = None
         self._cdfkd_identity_checked = False
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD':
@@ -230,6 +235,15 @@ class ModuleSet(nn.Module):
                     self.cdfkd_config['div_strength'])
             else:
                 print('[CDFKD SOURCE] source_diversification=False mode=original_source_only')
+            if self.cdfkd_config.get('advsp', False):
+                self.cdfkd_spectral = SpectralPerturbationModule(
+                    csg=self.cdfkd_config['advsp_csg'],
+                    tsg=self.cdfkd_config['advsp_tsg'],
+                    scg=self.cdfkd_config['advsp_scg'],
+                    tau=float(os.environ.get('SNORM_ADVSP_FREQ_TAU', '0.10')),
+                    object_protect=self.cdfkd_config['advsp_object_protect'],
+                    object_rho=self.cdfkd_config['advsp_object_rho'],
+                )
     
     def prev_norm(self, x):
         
@@ -253,10 +267,125 @@ class ModuleSet(nn.Module):
         #x = self.backbone_2n(x)
         return x
 
+    def _cdfkd_advsp_detect(self, rendered, img_metas, targets):
+        image = (self.cdfkd_adapter(rendered)
+                 if self.cdfkd_adapter is not None else rendered)
+        feature_base = self.back_norm_w_snorm(image)
+        feature = (self.cdfkd_feature_adapter(feature_base)
+                   if self.cdfkd_feature_adapter is not None else feature_base)
+        proposals, rpn_losses, _, _ = self.rpn_norm(
+            image, feature, img_metas, targets
+        )
+        _, box_losses, _, _, _, _, _, _, _ = self.box_head_norm(
+            feature, proposals, img_metas, targets
+        )
+        return image, feature, rpn_losses, box_losses
+
+    @staticmethod
+    def _cdfkd_advsp_det_loss(result):
+        return sum(result[2].values()) + sum(result[3].values())
+
+    def _forward_cdfkd_advsp(self, images, img_metas, targets):
+        config = self.cdfkd_config
+        if self.cdfkd_spectral is None:
+            raise RuntimeError('AdvSP spectral module is not initialized')
+        # Frozen rendering is used for the clean path; max-stage rendering
+        # keeps its input graph so factor gradients reach the detection loss.
+        with torch.no_grad():
+            clean_rendered, _ = self.dist_prog(
+                images.detach(), targets, stride=8, force_eval_render=True,
+            )
+        clean = self._cdfkd_advsp_detect(clean_rendered.detach(), img_metas, targets)
+        batch = images.size(0)
+        factors = make_spectral_factors(
+            batch, images.device, images.dtype, config['advsp_radius'],
+            config['advsp_csg'], config['advsp_tsg'], config['advsp_scg'],
+        )
+        sizes = [tuple(meta['img_shape'][:2]) for meta in img_metas]
+        boxes = [target.get('boxes', target.get('bbox'))
+                 if isinstance(target, dict) else target for target in targets]
+
+        def transform(source):
+            spectral = self.cdfkd_spectral(
+                source, factors[0], factors[1], factors[2],
+                image_sizes=sizes, boxes=boxes,
+            )
+            return spectral
+
+        if config.get('advsp_random_only', False):
+            adv_image = transform(images.detach())
+        else:
+            for _ in range(config['advsp_steps']):
+                spectral = transform(images.detach())
+                # The renderer and detector are frozen, not graph-disabled:
+                # autograd.grad must reach only ephemeral spectral factors.
+                adversarial_rendered, _ = self.dist_prog(
+                    spectral, targets, stride=8, force_eval_render=True,
+                )
+                adv_result = self._cdfkd_advsp_detect(
+                    adversarial_rendered, img_metas, targets
+                )
+                active_factors = [factor for factor in factors if factor is not None]
+                if not active_factors:
+                    break
+                gradients = torch.autograd.grad(
+                    self._cdfkd_advsp_det_loss(adv_result), active_factors,
+                    allow_unused=True,
+                )
+                grad_iter = iter(gradients)
+                expanded = tuple(None if factor is None else next(grad_iter)
+                                 for factor in factors)
+                updated = update_spectral_factors(
+                    factors, expanded, config['advsp_radius'],
+                    config['advsp_tau'],
+                )
+                factors = tuple(None if factor is None else
+                                value.detach().requires_grad_(True)
+                                for factor, value in zip(factors, updated))
+            adv_image = transform(images.detach())
+
+        # Min stage sees a detached adversarial image; only the persistent
+        # feature adapter receives gradients from the second detector pass.
+        with torch.no_grad():
+            adv_rendered, _ = self.dist_prog(
+                adv_image.detach(), targets, stride=8, force_eval_render=True,
+            )
+        adversarial = self._cdfkd_advsp_detect(
+            adv_rendered.detach(), img_metas, targets
+        )
+        mu = config['advsp_mu']
+        rpn_losses = {
+            key: clean[2][key] + mu * adversarial[2][key]
+            for key in clean[2]
+        }
+        box_losses = {
+            key: clean[3][key] + mu * adversarial[3][key]
+            for key in clean[3]
+        }
+        zero = clean[1].sum() * 0.0
+        return {
+            'rpn_losses': rpn_losses,
+            'box_losses': box_losses,
+            'reference_feature': clean[1].detach(),
+            'student_feature': clean[1],
+            'student_image': clean[0],
+            'student_base': clean_rendered.detach(),
+            'student_feature_base': clean[1],
+            'loss_global': zero,
+            'loss_instance': zero,
+            'loss_hard_object': zero,
+            'hard_object_stats': None,
+            'diversification': {'operation': 'advsp', 'downscale_ratio': 1.0},
+            'advsp_clean_loss': self._cdfkd_advsp_det_loss(clean).detach(),
+            'advsp_adv_loss': self._cdfkd_advsp_det_loss(adversarial).detach(),
+        }
+
     def forward_cdfkd(self, images, img_metas, targets):
         """Frozen-E2/frozen-detector Stage-A path; only adapter is trainable."""
         if self.cdfkd_config is None:
             raise RuntimeError('CDFKD modules require SNORM_EXPERIMENT=CDFKD')
+        if self.cdfkd_config.get('advsp', False):
+            return self._forward_cdfkd_advsp(images, img_metas, targets)
         if self.cdfkd_config.get('source_diversification', True):
             if self.cdfkd_diversification is None:
                 raise RuntimeError('CDFKD source diversification is not initialized')
