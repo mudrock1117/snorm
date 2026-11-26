@@ -820,6 +820,54 @@ a3_controller=None):
                             print('[CDFKD {} RESIDUAL] mean_abs/max_abs = {:.6e}/{:.6e}'.format(
                                 _name, float(_res.abs().mean().item()), float(_res.abs().max().item())))
                         print('[CDFKD SOURCE]', _cdfkd['diversification'])
+                        _advdiag = _cdfkd.get('advsp_diagnostics')
+                        if _advdiag is not None:
+                            def _advsp_pair(_stats):
+                                if _stats is None or _stats.get('mean') is None:
+                                    return 'n/a'
+                                return '{:.4e}/{:.4e}'.format(
+                                    float(_stats['mean'].item()),
+                                    float(_stats['max'].item()),
+                                )
+                            for _factor_name in ('alpha', 'beta', 'gamma'):
+                                _fd = _advdiag['factors'].get(_factor_name)
+                                if _fd is None:
+                                    continue
+                                print(
+                                    '[ADVSP FACTOR] {} before={}; after={}; '
+                                    'update={}; clamp_fraction={:.4f}'.format(
+                                        _factor_name,
+                                        _advsp_pair(_fd['before']),
+                                        _advsp_pair(_fd['after']),
+                                        _advsp_pair(_fd['update']),
+                                        float(_fd['clamp_fraction'].item()),
+                                    )
+                                )
+                                print('[ADVSP GRAD] {} abs_mean/max={}'.format(
+                                    _factor_name, _advsp_pair(_fd['grad'])
+                                ))
+                            print(
+                                '[ADVSP IMAGE] delta mean/min/max='
+                                '{:.4e}/{:.4e}/{:.4e} rendered_diff mean/max='
+                                '{:.4e}/{:.4e}'.format(
+                                    float(_advdiag['delta_mean'].item()),
+                                    float(_advdiag['delta_min'].item()),
+                                    float(_advdiag['delta_max'].item()),
+                                    float(_advdiag['image_diff_mean'].item()),
+                                    float(_advdiag['image_diff_max'].item()),
+                                )
+                            )
+                            print(
+                                '[ADVSP LOSS] clean={:.6f} adv={:.6f} '
+                                'mu={:.4f} total={:.6f}'.format(
+                                    float(_cdfkd['advsp_clean_loss'].item()),
+                                    float(_cdfkd['advsp_adv_loss'].item()),
+                                    float(_cdfkd_inner.teacher.cdfkd_config['advsp_mu']),
+                                    float((_cdfkd['advsp_clean_loss'] +
+                                           _cdfkd_inner.teacher.cdfkd_config['advsp_mu'] *
+                                           _cdfkd['advsp_adv_loss']).item()),
+                                )
+                            )
                     del total_cdfkd_loss, loss_dict_cdfkd, outputs_cdfkd
                     torch.cuda.empty_cache()
                 elif _exp_loop in ('D1', 'D2', 'D3'):

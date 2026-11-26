@@ -44,7 +44,7 @@ from detection.modeling.cdfkd import (
 )
 from detection.modeling.advsp import (
     SpectralPerturbationModule, make_spectral_factors,
-    update_spectral_factors,
+    update_spectral_factors, fft_backend_name, _tensor_abs_stats,
 )
 #from detection.modeling.norm.R202509x.SNorm_0322_valid_refine_expmamba import SNorm
 
@@ -240,9 +240,32 @@ class ModuleSet(nn.Module):
                     csg=self.cdfkd_config['advsp_csg'],
                     tsg=self.cdfkd_config['advsp_tsg'],
                     scg=self.cdfkd_config['advsp_scg'],
-                    tau=float(os.environ.get('SNORM_ADVSP_FREQ_TAU', '0.10')),
+                    delta_min=self.cdfkd_config['advsp_delta_min'],
+                    delta_max=self.cdfkd_config['advsp_delta_max'],
                     object_protect=self.cdfkd_config['advsp_object_protect'],
                     object_rho=self.cdfkd_config['advsp_object_rho'],
+                )
+                print(
+                    '[ADVSP CONFIG] preset={} CSG={} TSG={} SCG={} '
+                    'random_only={} r={} steps={} update_tau={} '
+                    'delta_min={} delta_max={} mu={} lambda={} '
+                    'object_protect={} object_rho={} FFT={}'.format(
+                        self.cdfkd_config['preset'],
+                        self.cdfkd_config['advsp_csg'],
+                        self.cdfkd_config['advsp_tsg'],
+                        self.cdfkd_config['advsp_scg'],
+                        self.cdfkd_config['advsp_random_only'],
+                        self.cdfkd_config['advsp_radius'],
+                        self.cdfkd_config['advsp_steps'],
+                        self.cdfkd_config['advsp_tau'],
+                        self.cdfkd_config['advsp_delta_min'],
+                        self.cdfkd_config['advsp_delta_max'],
+                        self.cdfkd_config['advsp_mu'],
+                        self.cdfkd_config['advsp_lambda'],
+                        self.cdfkd_config['advsp_object_protect'],
+                        self.cdfkd_config['advsp_object_rho'],
+                        fft_backend_name(),
+                    )
                 )
     
     def prev_norm(self, x):
@@ -304,19 +327,34 @@ class ModuleSet(nn.Module):
         sizes = [tuple(meta['img_shape'][:2]) for meta in img_metas]
         boxes = [target.get('boxes', target.get('bbox'))
                  if isinstance(target, dict) else target for target in targets]
+        sampled_deltas = torch.empty(
+            batch, device=images.device, dtype=images.dtype
+        ).uniform_(config['advsp_delta_min'], config['advsp_delta_max'])
+        factor_names = ('alpha', 'beta', 'gamma')
+        factor_diagnostics = {}
+        for name, factor in zip(factor_names, factors):
+            if factor is not None:
+                factor_diagnostics[name] = {
+                    'before': _tensor_abs_stats(factor),
+                    'grad': _tensor_abs_stats(None),
+                    'update': _tensor_abs_stats(None),
+                    'after': _tensor_abs_stats(factor),
+                    'clamp_fraction': factor.new_zeros(()),
+                }
+        delta_values = sampled_deltas
 
         def transform(source):
-            spectral = self.cdfkd_spectral(
+            return self.cdfkd_spectral(
                 source, factors[0], factors[1], factors[2],
-                image_sizes=sizes, boxes=boxes,
+                image_sizes=sizes, boxes=boxes, deltas=sampled_deltas,
+                return_deltas=True,
             )
-            return spectral
 
         if config.get('advsp_random_only', False):
-            adv_image = transform(images.detach())
+            adv_image, delta_values = transform(images.detach())
         else:
             for _ in range(config['advsp_steps']):
-                spectral = transform(images.detach())
+                spectral, delta_values = transform(images.detach())
                 # The renderer and detector are frozen, not graph-disabled:
                 # autograd.grad must reach only ephemeral spectral factors.
                 adversarial_rendered, _ = self.dist_prog(
@@ -339,10 +377,27 @@ class ModuleSet(nn.Module):
                     factors, expanded, config['advsp_radius'],
                     config['advsp_tau'],
                 )
+                for name, factor, gradient, updated_factor in zip(
+                        factor_names, factors, expanded, updated):
+                    if factor is None:
+                        continue
+                    record = factor_diagnostics[name]
+                    record['grad'] = _tensor_abs_stats(gradient)
+                    raw_update = (factor.detach() + config['advsp_tau'] * gradient
+                                  if gradient is not None else factor.detach())
+                    record['clamp_fraction'] = (
+                        ((raw_update > config['advsp_radius']) |
+                         (raw_update < -config['advsp_radius']))
+                        .to(dtype=factor.dtype).mean().detach()
+                    )
+                    record['update'] = _tensor_abs_stats(
+                        updated_factor - factor.detach()
+                    )
+                    record['after'] = _tensor_abs_stats(updated_factor)
                 factors = tuple(None if factor is None else
                                 value.detach().requires_grad_(True)
                                 for factor, value in zip(factors, updated))
-            adv_image = transform(images.detach())
+            adv_image, delta_values = transform(images.detach())
 
         # Min stage sees a detached adversarial image; only the persistent
         # feature adapter receives gradients from the second detector pass.
@@ -354,6 +409,14 @@ class ModuleSet(nn.Module):
             adv_rendered.detach(), img_metas, targets
         )
         mu = config['advsp_mu']
+        advsp_diagnostics = {
+            'factors': factor_diagnostics,
+            'delta_mean': delta_values.detach().mean(),
+            'delta_min': delta_values.detach().min(),
+            'delta_max': delta_values.detach().max(),
+            'image_diff_mean': (adv_rendered.detach() - clean_rendered.detach()).abs().mean(),
+            'image_diff_max': (adv_rendered.detach() - clean_rendered.detach()).abs().max(),
+        }
         rpn_losses = {
             key: clean[2][key] + mu * adversarial[2][key]
             for key in clean[2]
@@ -378,6 +441,7 @@ class ModuleSet(nn.Module):
             'diversification': {'operation': 'advsp', 'downscale_ratio': 1.0},
             'advsp_clean_loss': self._cdfkd_advsp_det_loss(clean).detach(),
             'advsp_adv_loss': self._cdfkd_advsp_det_loss(adversarial).detach(),
+            'advsp_diagnostics': advsp_diagnostics,
         }
 
     def forward_cdfkd(self, images, img_metas, targets):

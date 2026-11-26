@@ -135,6 +135,8 @@ def resolve_cdfkd_config(environ=None):
         'advsp_steps': int(env.get('SNORM_ADVSP_STEPS', '1')),
         'advsp_tau': float(env.get('SNORM_ADVSP_TAU', '0.05')),
         'advsp_lambda': float(env.get('SNORM_ADVSP_LAMBDA', '0.0')),
+        'advsp_delta_min': float(env.get('SNORM_ADVSP_DELTA_MIN', '0.0')),
+        'advsp_delta_max': float(env.get('SNORM_ADVSP_DELTA_MAX', '0.01')),
         'advsp_object_rho': float(env.get('SNORM_ADVSP_OBJECT_RHO', '0.5')),
     })
     if config['advsp']:
@@ -147,7 +149,9 @@ def resolve_cdfkd_config(environ=None):
         if config['advsp_radius'] <= 0.0 or config['advsp_steps'] < 1:
             raise ValueError('AdvSP requires R > 0 and STEPS >= 1')
         if config['advsp_tau'] <= 0.0 or config['advsp_mu'] < 0.0:
-            raise ValueError('AdvSP tau must be positive and mu non-negative')
+            raise ValueError('AdvSP update tau must be positive and mu non-negative')
+        if not (0.0 <= config['advsp_delta_min'] <= config['advsp_delta_max'] <= 0.5):
+            raise ValueError('AdvSP delta range must satisfy 0 <= min <= max <= 0.5')
     config.setdefault('source_diversification', True)
     config.setdefault('hard_object', False)
     config.setdefault('hard_object_weight', 0.0)
