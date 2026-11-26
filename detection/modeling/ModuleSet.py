@@ -344,7 +344,11 @@ class ModuleSet(nn.Module):
             clean_rendered, _ = self.dist_prog(
                 images.detach(), targets, stride=8, force_eval_render=True,
             )
-        clean = self._cdfkd_advsp_detect(clean_rendered.detach(), img_metas, targets)
+        # Do not build the trainable clean detector graph before the adversarial
+        # max-stage. Keeping that BS=2 graph alive while differentiating through
+        # render+detector causes the >24 GiB peak on RTX 3090. The clean detector
+        # pass is mathematically independent of factor optimization, so defer it
+        # until the ephemeral max-stage graph has been consumed.
         batch = images.size(0)
         factors = make_spectral_factors(
             batch, images.device, images.dtype, config['advsp_radius'],
@@ -437,6 +441,12 @@ class ModuleSet(nn.Module):
                                 value.detach().requires_grad_(True)
                                 for factor, value in zip(factors, updated))
             adv_image, delta_values = transform(images.detach())
+
+        # Build the persistent clean training graph only after max-stage
+        # autograd.grad has consumed and released its temporary graph.
+        clean = self._cdfkd_advsp_detect(
+            clean_rendered.detach(), img_metas, targets
+        )
 
         # Min stage sees a detached adversarial image; only the persistent
         # feature adapter receives gradients from the second detector pass.
