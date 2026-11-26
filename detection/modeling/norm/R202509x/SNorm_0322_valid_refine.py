@@ -928,6 +928,12 @@ class SNorm(nn.Module):
                 return extract_ahdr_render_tensor(
                     self.render_net(a, b, c)
                 )
+            # Legacy reentrant checkpoint only builds a backward graph when at
+            # least one explicit input requires grad. Upstream E2 preprocessing
+            # is intentionally frozen, so create a local anchor if necessary.
+            # It is not an optimizer parameter and its gradient is discarded.
+            if not (x0.requires_grad or x1.requires_grad or x2.requires_grad):
+                x1 = x1.detach().requires_grad_(True)
             return checkpoint(_joint_render, x0, x1, x2)
 
         if getattr(self, '_d1_det_checkpoint_active', False):
