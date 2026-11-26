@@ -261,8 +261,9 @@ class SNorm(nn.Module):
         self.alpha_ba.data.fill_(1.0)
         self.alpha_bu.data.zero_()
 
-    def forward(self, feats, use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=None, targets=None, force_eval_render=False, d1_det_checkpoint=False):
+    def forward(self, feats, use_moe=False, use_moe_fusion=False, moe_mode=0, moe_mark=None, targets=None, force_eval_render=False, d1_det_checkpoint=False, cdfkd_joint_checkpoint=False):
         self._d1_det_checkpoint_active = bool(d1_det_checkpoint)
+        self._cdfkd_joint_checkpoint_active = bool(cdfkd_joint_checkpoint)
         ################## segnet ####################
         if self.training and not force_eval_render:
             # global
@@ -918,7 +919,21 @@ class SNorm(nn.Module):
         while the model remains in training mode, so the contract is parsed
         explicitly without changing render_net mode or return values.
         """
+        if getattr(self, '_cdfkd_joint_checkpoint_active', False):
+            # Joint min-stage is consumed by the ordinary outer loss.backward().
+            # Legacy reentrant checkpoint therefore remains valid here and,
+            # unlike _AdvSPRenderRecompute, recomputes render_net under autograd
+            # so gradients accumulate into AHDR parameters as well as inputs.
+            def _joint_render(a, b, c):
+                return extract_ahdr_render_tensor(
+                    self.render_net(a, b, c)
+                )
+            return checkpoint(_joint_render, x0, x1, x2)
+
         if getattr(self, '_d1_det_checkpoint_active', False):
+            # AdvSP max-stage uses outer autograd.grad on spectral factors.
+            # Keep the custom recompute path because legacy checkpoint is not
+            # compatible with that API in this project's PyTorch version.
             return _AdvSPRenderRecompute.apply(
                 x0, x1, x2, self.render_net
             )
