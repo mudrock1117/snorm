@@ -324,7 +324,12 @@ class ModuleSet(nn.Module):
             batch, images.device, images.dtype, config['advsp_radius'],
             config['advsp_csg'], config['advsp_tsg'], config['advsp_scg'],
         )
-        # Project metadata stores img_shape as (width, height), while AdvSP\n        # consumes valid extents as (height, width). Keep box coordinates unchanged.\n        sizes = [\n            (int(meta['img_shape'][1]), int(meta['img_shape'][0]))\n            for meta in img_metas\n        ]
+        # Project metadata stores img_shape as (width, height), while AdvSP
+        # consumes valid extents as (height, width). Keep box coordinates unchanged.
+        sizes = [
+            (int(meta['img_shape'][1]), int(meta['img_shape'][0]))
+            for meta in img_metas
+        ]
         boxes = [target.get('boxes', target.get('bbox'))
                  if isinstance(target, dict) else target for target in targets]
         sampled_deltas = torch.empty(
