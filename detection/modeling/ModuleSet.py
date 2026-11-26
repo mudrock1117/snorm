@@ -388,6 +388,101 @@ class ModuleSet(nn.Module):
         if config.get('advsp_random_only', False):
             adv_image, delta_values = transform(images.detach())
         else:
+            # The AdvSP max-stage is independent per image: spectral factors are
+            # per-sample and the detector loss is a sum over the batch. Evaluate
+            # one sample at a time to keep the temporary render+detector graph
+            # within 24 GiB, while preserving the BS=2 min-stage below.
+            max_microbatch = max(
+                1, int(os.environ.get('SNORM_ADVSP_MAX_MICROBATCH', '1'))
+            )
+            for _ in range(config['advsp_steps']):
+                expanded_parts = [
+                    [] if factor is not None else None for factor in factors
+                ]
+                delta_parts = []
+                for mb_start in range(0, batch, max_microbatch):
+                    mb_end = min(batch, mb_start + max_microbatch)
+                    mb_factors = tuple(
+                        None if factor is None else
+                        factor[mb_start:mb_end].detach().requires_grad_(True)
+                        for factor in factors
+                    )
+                    mb_sizes = sizes[mb_start:mb_end]
+                    mb_boxes = boxes[mb_start:mb_end]
+                    mb_deltas = sampled_deltas[mb_start:mb_end]
+                    spectral, mb_delta_values = self.cdfkd_spectral(
+                        images[mb_start:mb_end].detach(),
+                        mb_factors[0], mb_factors[1], mb_factors[2],
+                        image_sizes=mb_sizes, boxes=mb_boxes,
+                        deltas=mb_deltas, return_deltas=True,
+                    )
+                    delta_parts.append(mb_delta_values.detach())
+                    mb_targets = targets[mb_start:mb_end]
+                    mb_metas = img_metas[mb_start:mb_end]
+                    offload_max_graph = os.environ.get(
+                        'SNORM_ADVSP_CPU_OFFLOAD', '1'
+                    ) != '0'
+                    with _advsp_saved_tensor_offload(offload_max_graph):
+                        adversarial_rendered, _ = self.dist_prog(
+                            spectral, mb_targets, stride=8,
+                            force_eval_render=True,
+                        )
+                        adv_result = self._cdfkd_advsp_detect(
+                            adversarial_rendered, mb_metas, mb_targets
+                        )
+                        active_factors = [
+                            factor for factor in mb_factors if factor is not None
+                        ]
+                        if active_factors:
+                            mb_gradients = torch.autograd.grad(
+                                self._cdfkd_advsp_det_loss(adv_result),
+                                active_factors, allow_unused=True,
+                            )
+                        else:
+                            mb_gradients = ()
+                    grad_iter = iter(mb_gradients)
+                    for index, factor in enumerate(mb_factors):
+                        if factor is None:
+                            continue
+                        gradient = next(grad_iter)
+                        if gradient is None:
+                            gradient = torch.zeros_like(factor)
+                        expanded_parts[index].append(gradient.detach())
+
+                delta_values = torch.cat(delta_parts, dim=0)
+                expanded = tuple(
+                    None if parts is None else torch.cat(parts, dim=0)
+                    for parts in expanded_parts
+                )
+                updated = update_spectral_factors(
+                    factors, expanded, config['advsp_radius'],
+                    config['advsp_tau'],
+                )
+                for name, factor, gradient, updated_factor in zip(
+                        factor_names, factors, expanded, updated):
+                    if factor is None:
+                        continue
+                    record = factor_diagnostics[name]
+                    record['grad'] = _tensor_abs_stats(gradient)
+                    raw_update = (
+                        factor.detach() + config['advsp_tau'] * gradient
+                        if gradient is not None else factor.detach()
+                    )
+                    record['clamp_fraction'] = (
+                        ((raw_update > config['advsp_radius']) |
+                         (raw_update < -config['advsp_radius']))
+                        .to(dtype=factor.dtype).mean().detach()
+                    )
+                    record['update'] = _tensor_abs_stats(
+                        updated_factor - factor.detach()
+                    )
+                    record['after'] = _tensor_abs_stats(updated_factor)
+                factors = tuple(
+                    None if factor is None else value.detach().requires_grad_(True)
+                    for factor, value in zip(factors, updated)
+                )
+            adv_image, delta_values = transform(images.detach())
+        else:
             for _ in range(config['advsp_steps']):
                 spectral, delta_values = transform(images.detach())
                 # The renderer and detector are frozen, not graph-disabled:
