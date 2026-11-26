@@ -2509,10 +2509,19 @@ def main(det_cfg, args):
                   ))
           optimizer_model = torch.optim.Adam(model_paramters, det_cfg.SOLVER.LR, betas=(0.9, 0.999), weight_decay=det_cfg.SOLVER.WEIGHT_DECAY)
           if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD':
+              _cdfkd_teacher = model_without_ddp.teacher
+              _cdfkd_joint = bool(
+                  _cdfkd_teacher.cdfkd_config.get('e2_joint', False)
+              )
               _cdfkd_allowed_optimizer_ids = set(
                   id(parameter) for _, module in _cdfkd_named_adapters(
-                      model_without_ddp.teacher) for parameter in module.parameters()
+                      _cdfkd_teacher) for parameter in module.parameters()
               )
+              if _cdfkd_joint:
+                  _cdfkd_allowed_optimizer_ids.update(
+                      id(parameter) for parameter in
+                      _cdfkd_teacher.proj_norm.render_net.parameters()
+                  )
               _cdfkd_optimizer_ids = set(
                   id(parameter)
                   for group in optimizer_model.param_groups
@@ -2520,8 +2529,18 @@ def main(det_cfg, args):
               )
               if _cdfkd_optimizer_ids != _cdfkd_allowed_optimizer_ids:
                   raise RuntimeError(
-                      '[CDFKD] optimizer parameters are not exactly adapter'
+                      '[CDFKD] optimizer parameters do not match {} whitelist'
+                      .format(
+                          'adapter+E2-render'
+                          if _cdfkd_joint else 'adapter-only'
+                      )
                   )
+              print(
+                  '[CDFKD OPTIMIZER AUDIT] exact {} whitelist passed'.format(
+                      'adapter+E2-render'
+                      if _cdfkd_joint else 'adapter-only'
+                  )
+              )
           if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'D1':
               _d1_allowed_optimizer_ids = set(
                   id(parameter)
