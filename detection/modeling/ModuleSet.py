@@ -482,60 +482,6 @@ class ModuleSet(nn.Module):
                     for factor, value in zip(factors, updated)
                 )
             adv_image, delta_values = transform(images.detach())
-        else:
-            for _ in range(config['advsp_steps']):
-                spectral, delta_values = transform(images.detach())
-                # The renderer and detector are frozen, not graph-disabled:
-                # autograd.grad must reach only ephemeral spectral factors.
-                # Max-stage needs input gradients all the way back to alpha/beta/gamma,
-                # but it does not need to keep those saved activations resident on GPU.
-                # CPU saved-tensor offload preserves the exact forward computation and
-                # autograd path while reducing the >24 GiB peak seen with BS=2 at 640.
-                offload_max_graph = os.environ.get(
-                    'SNORM_ADVSP_CPU_OFFLOAD', '1'
-                ) != '0'
-                with _advsp_saved_tensor_offload(offload_max_graph):
-                    adversarial_rendered, _ = self.dist_prog(
-                        spectral, targets, stride=8, force_eval_render=True,
-                    )
-                    adv_result = self._cdfkd_advsp_detect(
-                        adversarial_rendered, img_metas, targets
-                    )
-                    active_factors = [factor for factor in factors if factor is not None]
-                    if not active_factors:
-                        break
-                    gradients = torch.autograd.grad(
-                        self._cdfkd_advsp_det_loss(adv_result), active_factors,
-                        allow_unused=True,
-                    )
-                grad_iter = iter(gradients)
-                expanded = tuple(None if factor is None else next(grad_iter)
-                                 for factor in factors)
-                updated = update_spectral_factors(
-                    factors, expanded, config['advsp_radius'],
-                    config['advsp_tau'],
-                )
-                for name, factor, gradient, updated_factor in zip(
-                        factor_names, factors, expanded, updated):
-                    if factor is None:
-                        continue
-                    record = factor_diagnostics[name]
-                    record['grad'] = _tensor_abs_stats(gradient)
-                    raw_update = (factor.detach() + config['advsp_tau'] * gradient
-                                  if gradient is not None else factor.detach())
-                    record['clamp_fraction'] = (
-                        ((raw_update > config['advsp_radius']) |
-                         (raw_update < -config['advsp_radius']))
-                        .to(dtype=factor.dtype).mean().detach()
-                    )
-                    record['update'] = _tensor_abs_stats(
-                        updated_factor - factor.detach()
-                    )
-                    record['after'] = _tensor_abs_stats(updated_factor)
-                factors = tuple(None if factor is None else
-                                value.detach().requires_grad_(True)
-                                for factor, value in zip(factors, updated))
-            adv_image, delta_values = transform(images.detach())
 
         # Build the persistent clean training graph only after max-stage
         # autograd.grad has consumed and released its temporary graph.
