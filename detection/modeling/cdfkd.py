@@ -63,6 +63,7 @@ for _advsp_name, _advsp_mode in {
     'feature_advsp': dict(random_only=False, csg=True, tsg=True, scg=True, object_protect=False),
     'feature_advsp_e2_joint': dict(random_only=False, csg=True, tsg=True, scg=True, object_protect=False, e2_joint=True),
     'feature_advsp_e2_anchor': dict(random_only=False, csg=True, tsg=True, scg=True, object_protect=False, e2_joint=True, e2_anchor=True),
+    'feature_advsp_e2_consistency': dict(random_only=False, csg=True, tsg=True, scg=True, object_protect=False, e2_joint=True, e2_consistency=True, adapter_anchor=True),
     'feature_advsp_no_phase': dict(random_only=False, csg=True, tsg=True, scg=False, object_protect=False),
     'feature_advsp_color': dict(random_only=False, csg=True, tsg=False, scg=False, object_protect=False),
     'feature_advsp_texture': dict(random_only=False, csg=False, tsg=True, scg=False, object_protect=False),
@@ -79,6 +80,8 @@ for _advsp_name, _advsp_mode in {
         advsp_object_protect=_advsp_mode['object_protect'],
         e2_joint=bool(_advsp_mode.get('e2_joint', False)),
         e2_anchor=bool(_advsp_mode.get('e2_anchor', False)),
+        e2_consistency=bool(_advsp_mode.get('e2_consistency', False)),
+        adapter_anchor=bool(_advsp_mode.get('adapter_anchor', False)),
     )
 
 def _env_bool(value):
@@ -116,6 +119,8 @@ def resolve_cdfkd_config(environ=None):
         'SNORM_ADVSP_OBJECT_PROTECT': ('advsp_object_protect', _env_bool),
         'SNORM_ADVSP_RANDOM_ONLY': ('advsp_random_only', _env_bool),
         'SNORM_CDFKD_E2_JOINT': ('e2_joint', _env_bool),
+        'SNORM_CDFKD_E2_CONSISTENCY': ('e2_consistency', _env_bool),
+        'SNORM_CDFKD_ADAPTER_ANCHOR': ('adapter_anchor', _env_bool),
     }
     for name, (key, parser) in overrides.items():
         if name in env:
@@ -144,6 +149,8 @@ def resolve_cdfkd_config(environ=None):
         'advsp_delta_max': float(env.get('SNORM_ADVSP_DELTA_MAX', '0.01')),
         'advsp_object_rho': float(env.get('SNORM_ADVSP_OBJECT_RHO', '0.5')),
         'e2_anchor_weight': float(env.get('SNORM_CDFKD_E2_ANCHOR_W', '0.1')),
+        'e2_consistency_weight': float(env.get('SNORM_CDFKD_E2_CONSISTENCY_W', '0.1')),
+        'adapter_anchor_weight': float(env.get('SNORM_CDFKD_ADAPTER_ANCHOR_W', '0.01')),
     })
     if config['advsp']:
         config.update({
@@ -161,6 +168,8 @@ def resolve_cdfkd_config(environ=None):
     config.setdefault('source_diversification', True)
     config.setdefault('e2_joint', False)
     config.setdefault('e2_anchor', False)
+    config.setdefault('e2_consistency', False)
+    config.setdefault('adapter_anchor', False)
     config.setdefault('hard_object', False)
     config.setdefault('hard_object_weight', 0.0)
     config.setdefault('hard_min_weight', 0.5)
