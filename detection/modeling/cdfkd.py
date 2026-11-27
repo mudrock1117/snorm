@@ -62,6 +62,7 @@ for _advsp_name, _advsp_mode in {
     'feature_spm_random': dict(random_only=True, csg=True, tsg=True, scg=True, object_protect=False),
     'feature_advsp': dict(random_only=False, csg=True, tsg=True, scg=True, object_protect=False),
     'feature_advsp_e2_joint': dict(random_only=False, csg=True, tsg=True, scg=True, object_protect=False, e2_joint=True),
+    'feature_advsp_e2_anchor': dict(random_only=False, csg=True, tsg=True, scg=True, object_protect=False, e2_joint=True, e2_anchor=True),
     'feature_advsp_no_phase': dict(random_only=False, csg=True, tsg=True, scg=False, object_protect=False),
     'feature_advsp_color': dict(random_only=False, csg=True, tsg=False, scg=False, object_protect=False),
     'feature_advsp_texture': dict(random_only=False, csg=False, tsg=True, scg=False, object_protect=False),
@@ -77,6 +78,7 @@ for _advsp_name, _advsp_mode in {
         advsp_scg=_advsp_mode['scg'],
         advsp_object_protect=_advsp_mode['object_protect'],
         e2_joint=bool(_advsp_mode.get('e2_joint', False)),
+        e2_anchor=bool(_advsp_mode.get('e2_anchor', False)),
     )
 
 def _env_bool(value):
@@ -141,6 +143,7 @@ def resolve_cdfkd_config(environ=None):
         'advsp_delta_min': float(env.get('SNORM_ADVSP_DELTA_MIN', '0.0')),
         'advsp_delta_max': float(env.get('SNORM_ADVSP_DELTA_MAX', '0.01')),
         'advsp_object_rho': float(env.get('SNORM_ADVSP_OBJECT_RHO', '0.5')),
+        'e2_anchor_weight': float(env.get('SNORM_CDFKD_E2_ANCHOR_W', '0.1')),
     })
     if config['advsp']:
         config.update({
@@ -157,6 +160,7 @@ def resolve_cdfkd_config(environ=None):
             raise ValueError('AdvSP delta range must satisfy 0 <= min <= max <= 0.5')
     config.setdefault('source_diversification', True)
     config.setdefault('e2_joint', False)
+    config.setdefault('e2_anchor', False)
     config.setdefault('hard_object', False)
     config.setdefault('hard_object_weight', 0.0)
     config.setdefault('hard_min_weight', 0.5)
