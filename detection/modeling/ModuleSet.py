@@ -316,14 +316,19 @@ class ModuleSet(nn.Module):
         current = tuple(self.proj_norm.render_net.parameters())
         if len(current) != len(self._cdfkd_e2_anchor_params):
             raise RuntimeError('[E2 ANCHOR] parameter snapshot mismatch')
-        # Mean squared displacement normalized per scalar parameter keeps the
-        # weight interpretable and independent of AHDR parameter count.
-        total = current[0].sum() * 0.0
+        # Relative RMS displacement is scale-aware. Plain parameter MSE is
+        # ~1e-8 at the learning rates used here and is numerically irrelevant
+        # beside a ~1e-1 detection loss even with lambda=0.1.
+        diff_sq = current[0].sum() * 0.0
+        ref_sq = current[0].sum().detach() * 0.0
         count = 0
         for param, reference in zip(current, self._cdfkd_e2_anchor_params):
-            total = total + (param - reference).pow(2).sum()
+            diff_sq = diff_sq + (param - reference).pow(2).sum()
+            ref_sq = ref_sq + reference.pow(2).sum()
             count += param.numel()
-        return total / float(max(1, count))
+        denom = (ref_sq / float(max(1, count))).sqrt().clamp(min=1e-6)
+        rms = (diff_sq / float(max(1, count)) + 1e-16).sqrt()
+        return rms / denom
 
     def prev_norm(self, x):
         
