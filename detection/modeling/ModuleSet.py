@@ -598,7 +598,7 @@ class ModuleSet(nn.Module):
             'student_base': clean_rendered.detach(),
             'e2_joint': e2_joint,
             'student_feature_base': clean[1],
-            'loss_global': anchor_loss,
+            'loss_global': zero,
             'loss_instance': zero,
             'e2_anchor_raw': anchor_raw.detach(),
             'e2_anchor_weight': anchor_weight,
