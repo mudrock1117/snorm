@@ -297,16 +297,24 @@ class ModuleSet(nn.Module):
     
     def snapshot_cdfkd_e2_anchor(self):
         """Snapshot the checkpoint-initialized AHDR parameters for anchoring."""
-        if self.cdfkd_config is None or not self.cdfkd_config.get('e2_anchor', False):
+        if self.cdfkd_config is None or not (
+                self.cdfkd_config.get('e2_anchor', False) or
+                self.cdfkd_config.get('e2_consistency', False)):
             return
         params = tuple(self.proj_norm.render_net.parameters())
         self._cdfkd_e2_anchor_params = tuple(
             param.detach().clone() for param in params
         )
-        print('[E2 ANCHOR] snapshotted {} render parameters weight={}'.format(
-            sum(param.numel() for param in params),
-            self.cdfkd_config['e2_anchor_weight'],
-        ))
+        if self.cdfkd_config.get('e2_anchor', False):
+            print('[E2 ANCHOR] snapshotted {} render parameters weight={}'.format(
+                sum(param.numel() for param in params),
+                self.cdfkd_config['e2_anchor_weight'],
+            ))
+        if self.cdfkd_config.get('e2_consistency', False):
+            print('[E2 CONSISTENCY] snapshotted {} official render parameters weight={}'.format(
+                sum(param.numel() for param in params),
+                self.cdfkd_config['e2_consistency_weight'],
+            ))
 
     def _cdfkd_e2_anchor_loss(self):
         if not self.cdfkd_config.get('e2_anchor', False):
@@ -329,6 +337,51 @@ class ModuleSet(nn.Module):
         denom = (ref_sq / float(max(1, count))).sqrt().clamp(min=1e-6)
         rms = (diff_sq / float(max(1, count)) + 1e-16).sqrt()
         return rms / denom
+
+    def _cdfkd_official_e2_render(self, images, targets, microbatch=1):
+        """Render clean source with the checkpoint E2 without a persistent copy.
+
+        This is called before the trainable min-stage render graph is built.
+        Parameter values are swapped under no_grad, reference outputs are
+        detached, and the current trainable values are restored immediately.
+        """
+        if self._cdfkd_e2_anchor_params is None:
+            raise RuntimeError('[E2 CONSISTENCY] official checkpoint snapshot is missing')
+        params = tuple(self.proj_norm.render_net.parameters())
+        if len(params) != len(self._cdfkd_e2_anchor_params):
+            raise RuntimeError('[E2 CONSISTENCY] parameter snapshot mismatch')
+        current_values = tuple(param.detach().clone() for param in params)
+        rendered_parts = []
+        try:
+            with torch.no_grad():
+                for param, reference in zip(params, self._cdfkd_e2_anchor_params):
+                    param.copy_(reference)
+                for start in range(0, images.size(0), microbatch):
+                    end = min(images.size(0), start + microbatch)
+                    rendered_part, _ = self.dist_prog(
+                        images[start:end].detach(), targets[start:end],
+                        stride=8, force_eval_render=True,
+                    )
+                    rendered_parts.append(rendered_part.detach())
+        finally:
+            with torch.no_grad():
+                for param, value in zip(params, current_values):
+                    param.copy_(value)
+        return torch.cat(rendered_parts, dim=0)
+
+    @staticmethod
+    def _cdfkd_render_consistency_loss(current, reference):
+        current_flat = current.float().view(current.size(0), -1)
+        reference_flat = reference.float().view(reference.size(0), -1)
+        return (1.0 - F.cosine_similarity(
+            current_flat, reference_flat, dim=1, eps=1e-8
+        )).mean()
+
+    @staticmethod
+    def _cdfkd_adapter_anchor_loss(feature, feature_base):
+        residual = feature - feature_base
+        denom = feature_base.detach().abs().mean().clamp(min=1e-6)
+        return residual.abs().mean() / denom
 
     def prev_norm(self, x):
         
@@ -364,7 +417,7 @@ class ModuleSet(nn.Module):
         _, box_losses, _, _, _, _, _, _, _ = self.box_head_norm(
             feature, proposals, img_metas, targets
         )
-        return image, feature, rpn_losses, box_losses
+        return image, feature, rpn_losses, box_losses, feature_base
 
     @staticmethod
     def _cdfkd_advsp_det_loss(result):
@@ -552,6 +605,11 @@ class ModuleSet(nn.Module):
                     rendered_parts.append(rendered_part)
                 return torch.cat(rendered_parts, dim=0)
 
+            reference_rendered = None
+            if config.get('e2_consistency', False):
+                reference_rendered = self._cdfkd_official_e2_render(
+                    images, targets, microbatch=joint_microbatch
+                )
             clean_rendered = _joint_render_microbatched(images)
             clean = self._cdfkd_advsp_detect(
                 clean_rendered, img_metas, targets
@@ -589,6 +647,18 @@ class ModuleSet(nn.Module):
             for key in clean[3]
         }
         zero = clean[1].sum() * 0.0
+        consistency_raw = zero
+        if config.get('e2_consistency', False):
+            if reference_rendered is None:
+                raise RuntimeError('[E2 CONSISTENCY] reference render is missing')
+            consistency_raw = self._cdfkd_render_consistency_loss(
+                clean_rendered, reference_rendered
+            )
+        adapter_anchor_raw = zero
+        if config.get('adapter_anchor', False):
+            adapter_anchor_raw = self._cdfkd_adapter_anchor_loss(
+                clean[1], clean[4]
+            )
         anchor_raw = self._cdfkd_e2_anchor_loss()
         if anchor_raw is None:
             anchor_raw = zero
@@ -607,6 +677,10 @@ class ModuleSet(nn.Module):
             'loss_instance': zero,
             'e2_anchor_raw': anchor_raw.detach(),
             'e2_anchor_weight': anchor_weight,
+            'e2_consistency_raw': consistency_raw,
+            'e2_consistency_weight': config.get('e2_consistency_weight', 0.0),
+            'adapter_anchor_raw': adapter_anchor_raw,
+            'adapter_anchor_weight': config.get('adapter_anchor_weight', 0.0),
             'loss_hard_object': zero,
             'hard_object_stats': None,
             'diversification': {'operation': 'advsp', 'downscale_ratio': 1.0},
