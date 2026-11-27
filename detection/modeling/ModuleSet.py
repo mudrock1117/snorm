@@ -580,6 +580,7 @@ class ModuleSet(nn.Module):
         # Build persistent min-stage graphs only after max-stage autograd.grad
         # has released its temporary graph. Legacy torch checkpoint is safe here
         # because the outer training step uses loss.backward(), not autograd.grad.
+        reference_rendered = None
         if e2_joint:
             # AHDR backward recomputation at full local BS=2 exceeds 24GB even
             # with activation offload because the window-attention forward
