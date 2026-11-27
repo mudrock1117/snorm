@@ -182,6 +182,13 @@ def resolve_cdfkd_config(environ=None):
         raise ValueError('CDFKD instance mode must be cosine or weighted')
     if not config['rgb_adapter'] and not config['feature_adapter']:
         raise ValueError('CDFKD requires at least one enabled adapter')
+    if config.get('e2_consistency', False) and not config.get('e2_joint', False):
+        raise ValueError('E2 consistency requires joint E2 training')
+    if config.get('adapter_anchor', False) and not config['feature_adapter']:
+        raise ValueError('Adapter anchor requires the feature adapter')
+    for key in ('e2_anchor_weight', 'e2_consistency_weight', 'adapter_anchor_weight'):
+        if config[key] < 0.0:
+            raise ValueError('CDFKD %s must be non-negative' % key)
     for key in ('det_weight', 'global_weight', 'instance_weight',
                 'hard_object_weight'):
         if config[key] < 0.0:
