@@ -746,8 +746,17 @@ a3_controller=None):
                         _cdfkd.get('e2_anchor_raw', raw_global_loss * 0.0)
                         * float(_cdfkd.get('e2_anchor_weight', 0.0))
                     )
+                    raw_consistency_loss = (
+                        _cdfkd.get('e2_consistency_raw', raw_global_loss * 0.0)
+                        * float(_cdfkd.get('e2_consistency_weight', 0.0))
+                    )
+                    raw_adapter_anchor_loss = (
+                        _cdfkd.get('adapter_anchor_raw', raw_global_loss * 0.0)
+                        * float(_cdfkd.get('adapter_anchor_weight', 0.0))
+                    )
                     total_cdfkd_loss = (
                         sum(loss_dict_cdfkd.values()) + raw_anchor_loss
+                        + raw_consistency_loss + raw_adapter_anchor_loss
                     )
                     total_cdfkd_loss.backward()
 
@@ -826,6 +835,26 @@ a3_controller=None):
                                     float(_cdfkd['e2_anchor_raw'].item()),
                                     float(_cdfkd['e2_anchor_weight']),
                                     float(raw_anchor_loss.detach().item()),
+                                )
+                            )
+                        if bool(_cdfkd_inner.teacher.cdfkd_config.get(
+                                'e2_consistency', False)):
+                            print(
+                                '[E2 CONSISTENCY] raw={:.8e} weight={:.4f} '
+                                'weighted={:.8e}'.format(
+                                    float(_cdfkd['e2_consistency_raw'].detach().item()),
+                                    float(_cdfkd['e2_consistency_weight']),
+                                    float(raw_consistency_loss.detach().item()),
+                                )
+                            )
+                        if bool(_cdfkd_inner.teacher.cdfkd_config.get(
+                                'adapter_anchor', False)):
+                            print(
+                                '[ADAPTER ANCHOR] raw={:.8e} weight={:.4f} '
+                                'weighted={:.8e}'.format(
+                                    float(_cdfkd['adapter_anchor_raw'].detach().item()),
+                                    float(_cdfkd['adapter_anchor_weight']),
+                                    float(raw_adapter_anchor_loss.detach().item()),
                                 )
                             )
                         _hard = _cdfkd['hard_object_stats']
@@ -1868,8 +1897,10 @@ def main(det_cfg, args):
         print('checkpoint load completed')
         if (
                 os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD'
-                and bool(model_without_ddp.teacher.cdfkd_config.get(
-                    'e2_anchor', False))):
+                and bool(
+                    model_without_ddp.teacher.cdfkd_config.get('e2_anchor', False)
+                    or model_without_ddp.teacher.cdfkd_config.get('e2_consistency', False)
+                )):
             model_without_ddp.teacher.snapshot_cdfkd_e2_anchor()
         if 'current_epoch' in checkpoint and args.use_current_epoch:
             current_epoch = int(checkpoint['current_epoch'])
