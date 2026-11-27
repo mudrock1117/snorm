@@ -244,6 +244,7 @@ class ModuleSet(nn.Module):
         self.cdfkd_spectral = None
         self.cdfkd_config = None
         self._cdfkd_identity_checked = False
+        self._cdfkd_e2_anchor_params = None
         if os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD':
             self.cdfkd_config = resolve_cdfkd_config()
             if self.cdfkd_config['rgb_adapter']:
@@ -294,6 +295,36 @@ class ModuleSet(nn.Module):
                     )
                 )
     
+    def snapshot_cdfkd_e2_anchor(self):
+        """Snapshot the checkpoint-initialized AHDR parameters for anchoring."""
+        if self.cdfkd_config is None or not self.cdfkd_config.get('e2_anchor', False):
+            return
+        params = tuple(self.proj_norm.render_net.parameters())
+        self._cdfkd_e2_anchor_params = tuple(
+            param.detach().clone() for param in params
+        )
+        print('[E2 ANCHOR] snapshotted {} render parameters weight={}'.format(
+            sum(param.numel() for param in params),
+            self.cdfkd_config['e2_anchor_weight'],
+        ))
+
+    def _cdfkd_e2_anchor_loss(self):
+        if not self.cdfkd_config.get('e2_anchor', False):
+            return None
+        if self._cdfkd_e2_anchor_params is None:
+            raise RuntimeError('[E2 ANCHOR] checkpoint snapshot is missing')
+        current = tuple(self.proj_norm.render_net.parameters())
+        if len(current) != len(self._cdfkd_e2_anchor_params):
+            raise RuntimeError('[E2 ANCHOR] parameter snapshot mismatch')
+        # Mean squared displacement normalized per scalar parameter keeps the
+        # weight interpretable and independent of AHDR parameter count.
+        total = current[0].sum() * 0.0
+        count = 0
+        for param, reference in zip(current, self._cdfkd_e2_anchor_params):
+            total = total + (param - reference).pow(2).sum()
+            count += param.numel()
+        return total / float(max(1, count))
+
     def prev_norm(self, x):
         
         return x
@@ -553,6 +584,11 @@ class ModuleSet(nn.Module):
             for key in clean[3]
         }
         zero = clean[1].sum() * 0.0
+        anchor_raw = self._cdfkd_e2_anchor_loss()
+        if anchor_raw is None:
+            anchor_raw = zero
+        anchor_weight = config.get('e2_anchor_weight', 0.0)
+        anchor_loss = anchor_weight * anchor_raw
         return {
             'rpn_losses': rpn_losses,
             'box_losses': box_losses,
@@ -562,8 +598,10 @@ class ModuleSet(nn.Module):
             'student_base': clean_rendered.detach(),
             'e2_joint': e2_joint,
             'student_feature_base': clean[1],
-            'loss_global': zero,
+            'loss_global': anchor_loss,
             'loss_instance': zero,
+            'e2_anchor_raw': anchor_raw.detach(),
+            'e2_anchor_weight': anchor_weight,
             'loss_hard_object': zero,
             'hard_object_stats': None,
             'diversification': {'operation': 'advsp', 'downscale_ratio': 1.0},
