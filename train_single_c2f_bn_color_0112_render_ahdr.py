@@ -742,7 +742,13 @@ a3_controller=None):
                     raw_global_loss = _cdfkd['loss_global']
                     raw_instance_loss = _cdfkd['loss_instance']
                     raw_hard_loss = _cdfkd['loss_hard_object']
-                    total_cdfkd_loss = sum(loss_dict_cdfkd.values())
+                    raw_anchor_loss = (
+                        _cdfkd.get('e2_anchor_raw', raw_global_loss * 0.0)
+                        * float(_cdfkd.get('e2_anchor_weight', 0.0))
+                    )
+                    total_cdfkd_loss = (
+                        sum(loss_dict_cdfkd.values()) + raw_anchor_loss
+                    )
                     total_cdfkd_loss.backward()
 
                     _cdfkd_inner = (model_det.module
@@ -812,6 +818,16 @@ a3_controller=None):
                                 float(raw_hard_loss.detach().item()),
                             )
                         )
+                        if bool(_cdfkd_inner.teacher.cdfkd_config.get(
+                                'e2_anchor', False)):
+                            print(
+                                '[E2 ANCHOR] raw={:.8e} weight={:.4f} '
+                                'weighted={:.8e}'.format(
+                                    float(_cdfkd['e2_anchor_raw'].item()),
+                                    float(_cdfkd['e2_anchor_weight']),
+                                    float(raw_anchor_loss.detach().item()),
+                                )
+                            )
                         _hard = _cdfkd['hard_object_stats']
                         if _hard is not None:
                             print('[CDFKD HARD] positive_rois={} mean_gt_prob={:.6f} '
@@ -1850,6 +1866,11 @@ def main(det_cfg, args):
                     )
                 print('[C3-V2 CHECKPOINT] only semantic predictor parameters are new')
         print('checkpoint load completed')
+        if (
+                os.environ.get('SNORM_EXPERIMENT', 'E0') == 'CDFKD'
+                and bool(model_without_ddp.teacher.cdfkd_config.get(
+                    'e2_anchor', False))):
+            model_without_ddp.teacher.snapshot_cdfkd_e2_anchor()
         if 'current_epoch' in checkpoint and args.use_current_epoch:
             current_epoch = int(checkpoint['current_epoch'])
     else:
