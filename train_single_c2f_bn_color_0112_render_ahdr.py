@@ -77,6 +77,8 @@ current_night_mAP = 0.0
 best_sum_mAP = 0.0
 best_step = -1
 best_mAP = 0.0
+best_foggy_mAP = 0.0
+best_night_mAP = 0.0
 
 ###memory module
 def normalize_image(x):
@@ -1389,7 +1391,7 @@ a3_controller=None):
                         ),
                     )
                 else:
-                    save_func('best.pth', 'sum_mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
+                    save_func('best.pth', 'best step: {}\nsum_mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_step, best_mAP, best_foggy_mAP, best_night_mAP))
             if dist_utils.is_main_process():
                 print(
                     '[{} EVAL] step={} fog={:.4f} night={:.4f} sum={:.4f}'.format(
@@ -1399,7 +1401,7 @@ a3_controller=None):
                         current_foggy_mAP + current_night_mAP,
                     )
                 )
-                print('Best sum mAP: {:.4f} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, current_foggy_mAP, current_night_mAP))
+                print('Best sum mAP: {:.4f} at step={} (foggy: {:.4f}, night: {:.4f})'.format(best_mAP, best_step, best_foggy_mAP, best_night_mAP))
 
     if det_cfg.MODEL.MODE.TRAIN_PROCESS == 'S1' and det_cfg.MODEL.MODE.UPDATE_TEACHER_MARK and epoch >= 0:
         if hasattr(model_det, 'module'):
@@ -1439,6 +1441,7 @@ a3_controller=None):
 def main(det_cfg, args):
     global best_mAP, best_sum_mAP, best_step
     global current_foggy_mAP, current_night_mAP
+    global best_foggy_mAP, best_night_mAP
     print('----num_workers:', det_cfg.DATALOADER.NUM_WORKERS)
     
     # 只在非测试模式下加载训练数据
@@ -2711,7 +2714,7 @@ def main(det_cfg, args):
 
         def test_func():
             global best_mAP, current_foggy_mAP, current_night_mAP
-            global best_sum_mAP, best_step
+            global best_sum_mAP, best_step, best_foggy_mAP, best_night_mAP
             updated = False
             model_det.eval()
             metrics = evaluation(model_det, test_loaders, device, det_cfg.TEST.EVAL_TYPES, output_dir=work_dir, iteration=global_step)
@@ -2754,6 +2757,9 @@ def main(det_cfg, args):
                         if current_sum > best_sum_mAP:
                             best_sum_mAP = current_sum
                             best_mAP = current_sum
+                            best_step = global_step
+                            best_foggy_mAP = current_foggy_mAP
+                            best_night_mAP = current_night_mAP
                             updated = True
                             print('Both foggy ({:.4f}) and night ({:.4f}) mAP > 0.4, sum improved to {:.4f}'.format(
                                 current_foggy_mAP, current_night_mAP, current_sum))
